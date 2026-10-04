@@ -13,8 +13,7 @@ npm run dev
 
 - calm, light health-tech visual language inspired by the supplied references;
 - teal accent used for important actions and soft button shadows/glows;
-- two primary start actions: chat and discharge-document upload;
+- a focused recovery prompt with compact discharge-document and operation controls;
 - responsive desktop/mobile layout;
-- upload modal with PDF/JPG/PNG drag & drop and file selection;
-- chat modal as the first-step UI shell;
-- no backend dependency yet, so the page is ready for later FastAPI integration.
+- direct PDF/image file selection and operation-based prompt prefill;
+- client-side prompt submission only; AI chat and document processing require a backend integration.
