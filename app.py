@@ -3,11 +3,13 @@ import json
 import os
 import re
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from typing import List, Optional
 import requests
 import urllib3
 import streamlit as st
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 # Отключаем предупреждения о самоподписанном SSL-сертификате Минцифры
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -20,7 +22,140 @@ CHAT_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
 
 
 # =====================================================================
-# 1. РАБОТА С GIGACHAT API (АВТОРИЗАЦИЯ И ЗАПРОСЫ)
+# 1. СТРОГАЯ ВАЛИДАЦИЯ JSON (PYDANTIC) И РАЗВОРАЧИВАНИЕ ПОВТОРЕНИЙ
+# =====================================================================
+
+class ReminderItem(BaseModel):
+    """
+    Единый формат конечного напоминания в календаре (БЕЗ типов).
+    Только 4 поля: конкретная дата (YYYY-MM-DD), время (HH:MM), название, описание.
+    """
+    date: str
+    time: str
+    title: str
+    description: str
+
+    @field_validator("date")
+    @classmethod
+    def validate_date_format(cls, v: str) -> str:
+        v = v.strip()
+        datetime.strptime(v, "%Y-%m-%d")
+        return v
+
+    @field_validator("time")
+    @classmethod
+    def validate_time_format(cls, v: str) -> str:
+        v = v.strip()
+        # Если модель вернула "9:00", нормализуем в "09:00"
+        parsed = datetime.strptime(v, "%H:%M")
+        return parsed.strftime("%H:%M")
+
+    @field_validator("title", "description")
+    @classmethod
+    def validate_non_empty(cls, v: str) -> str:
+        cleaned = v.strip()
+        if not cleaned:
+            raise ValueError("Поле не может быть пустым")
+        return cleaned
+
+
+class ExtractedRuleItem(BaseModel):
+    """
+    Промежуточное правило, которое возвращает ИИ из текста выписки.
+    Позволяет корректно развернуть длительные курсы (например, Кальций на 2 месяца = 60 дней)
+    на каждую конкретную дату календаря без обрыва JSON из-за лимита токенов.
+    """
+    title: str = Field(..., min_length=1)
+    description: str = Field(..., min_length=1)
+    times: List[str] = Field(default_factory=lambda: ["09:00"])
+    exact_date: Optional[str] = None
+    start_offset_days: int = Field(default=0, ge=0, le=365)
+    duration_days: int = Field(default=1, ge=1, le=180)
+    interval_days: int = Field(default=1, ge=1, le=90)
+
+
+class ExtractedScheduleResponse(BaseModel):
+    rules: List[ExtractedRuleItem] = Field(default_factory=list)
+    reminders: List[ReminderItem] = Field(default_factory=list)
+
+
+def extract_json_string(raw_text: str) -> str:
+    """Находит и очищает JSON-объект из ответа нейросети (убирает markdown ```json ... ``` и лишние запятые)."""
+    cleaned = re.sub(r"```(?:json)?", "", raw_text, flags=re.IGNORECASE).replace("```", "").strip()
+    match = re.search(r"\{[\s\S]*\}", cleaned)
+    if not match:
+        raise ValueError("В ответе модели не найден JSON-объект {...}")
+    json_str = match.group(0)
+    # Убираем висячие запятые перед } или ], которые иногда ставят LLM
+    json_str = re.sub(r",\s*([}\]])", r"\1", json_str)
+    return json_str
+
+
+def expand_and_validate_schedule(raw_json_str: str, start_date: date) -> List[dict]:
+    """
+    1. Парсит и валидирует JSON через Pydantic (ExtractedScheduleResponse).
+    2. Разворачивает повторяющиеся рекомендации (например, курс кальция на 2 месяца / 60 дней
+       или перевязки каждые 2 дня) в конкретные даты календаря YYYY-MM-DD.
+    3. Прогоняет каждое итоговое напоминание через строгий валидатор ReminderItem.
+    """
+    data = json.loads(raw_json_str)
+    parsed = ExtractedScheduleResponse.model_validate(data)
+
+    final_reminders: List[ReminderItem] = []
+
+    # 1. Если модель вернула готовые одиночные напоминания — валидируем их
+    for item in parsed.reminders:
+        final_reminders.append(item)
+
+    # 2. Разворачиваем правила (включая повторяющиеся курсы на недели и месяцы)
+    for rule in parsed.rules:
+        if rule.exact_date:
+            try:
+                rule_start = datetime.strptime(rule.exact_date.strip(), "%Y-%m-%d").date()
+            except ValueError:
+                rule_start = start_date + timedelta(days=rule.start_offset_days)
+        else:
+            rule_start = start_date + timedelta(days=rule.start_offset_days)
+
+        day_offset = 0
+        while day_offset < rule.duration_days:
+            current_date_str = (rule_start + timedelta(days=day_offset)).isoformat()
+            for t in rule.times:
+                try:
+                    validated_item = ReminderItem(
+                        date=current_date_str,
+                        time=t,
+                        title=rule.title,
+                        description=rule.description,
+                    )
+                    final_reminders.append(validated_item)
+                except ValidationError:
+                    # Если время некорректное, подставляем 09:00
+                    validated_item = ReminderItem(
+                        date=current_date_str,
+                        time="09:00",
+                        title=rule.title,
+                        description=rule.description,
+                    )
+                    final_reminders.append(validated_item)
+            day_offset += max(1, rule.interval_days)
+
+    if not final_reminders:
+        raise ValueError("После валидации список напоминаний оказался пустым")
+
+    # Удаляем полные дубликаты и сортируем по дате и времени
+    unique_map = {}
+    for r in final_reminders:
+        key = (r.date, r.time, r.title)
+        unique_map[key] = r.model_dump()
+
+    sorted_list = list(unique_map.values())
+    sorted_list.sort(key=lambda x: (x["date"], x["time"], x["title"]))
+    return sorted_list
+
+
+# =====================================================================
+# 2. РАБОТА С GIGACHAT API (АВТОРИЗАЦИЯ И ЗАПРОСЫ С ПОДДЕРЖКОЙ GIGACHAT-PRO)
 # =====================================================================
 
 def clean_value(val: str | None) -> str:
@@ -63,11 +198,49 @@ def get_access_token(auth_key: str, scope: str = "GIGACHAT_API_PERS") -> str:
     return response.json()["access_token"]
 
 
+def call_gigachat_with_fallback(
+    access_token: str,
+    messages: list[dict],
+    preferred_model: str = "GigaChat-Pro",
+    temperature: float = 0.2,
+) -> tuple[str, str]:
+    """
+    Вызывает выбранную мощную модель (например, GigaChat-Pro или GigaChat-Max).
+    Если на бесплатном тарифе пользователя нет токенов для GigaChat-Pro (ошибка 402/404/422),
+    автоматически переключается на базовую модель GigaChat, чтобы запрос не падал.
+    Возвращает кортеж: (текст_ответа, имя_сработавшей_модели).
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {access_token}",
+    }
+
+    models_to_try = [preferred_model]
+    if preferred_model != "GigaChat":
+        models_to_try.append("GigaChat")
+
+    last_error = None
+    for current_model in models_to_try:
+        payload = {
+            "model": current_model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        response = requests.post(CHAT_URL, headers=headers, json=payload, verify=False, timeout=60)
+        if response.status_code == 200:
+            data = response.json()
+            return data["choices"][0]["message"]["content"], current_model
+        last_error = f"HTTP {response.status_code}: {response.text}"
+
+    raise RuntimeError(f"Ошибка GigaChat API: {last_error}")
+
+
 def ask_gigachat(
     access_token: str,
     messages: list[dict],
     recommendations_text: str = "",
-    model: str = "GigaChat",
+    model: str = "GigaChat-Pro",
 ) -> str:
     """Отправляет историю диалога в GigaChat API и возвращает текстовый ответ пациенту."""
     context_note = (
@@ -83,73 +256,77 @@ def ask_gigachat(
             + context_note
         ),
     }
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": f"Bearer {access_token}",
-    }
-    payload = {
-        "model": model,
-        "messages": [system_prompt] + messages,
-        "temperature": 0.5,
-    }
-
-    response = requests.post(CHAT_URL, headers=headers, json=payload, verify=False, timeout=60)
-    response.raise_for_status()
-    data = response.json()
-    return data["choices"][0]["message"]["content"]
+    reply, _ = call_gigachat_with_fallback(
+        access_token,
+        [system_prompt] + messages,
+        preferred_model=model,
+        temperature=0.5,
+    )
+    return reply
 
 
 def generate_schedule_once_from_recommendations(
     access_token: str,
     recommendations_text: str,
     start_date: date,
-    model: str = "GigaChat",
-) -> list[dict]:
+    model: str = "GigaChat-Pro",
+) -> tuple[List[dict], str]:
     """
-    Вызывается ТОЛЬКО ОДИН РАЗ при прикреплении списка рекомендаций (выписки).
-    Превращает текст рекомендаций в единый список напоминаний с КОНКРЕТНЫМИ датами календаря (YYYY-MM-DD).
-    Каждое напоминание имеет одинаковую структуру без типов:
-      - date: "YYYY-MM-DD" (конкретная дата в календаре)
-      - time: "HH:MM" (время)
-      - title: строка (название)
-      - description: строка (описание)
+    Вызывается ТОЛЬКО ОДИН РАЗ при прикреплении списка рекомендаций.
+    1. Отправляет текст выписки в GigaChat-Pro.
+    2. Проводит строгую валидацию JSON через Pydantic (при ошибке делает до 2 повторных попыток с исправлением).
+    3. Разворачивает все повторяющиеся назначения (даже на 2 месяца = 60 дней) в конкретные даты календаря YYYY-MM-DD.
     """
     today_str = start_date.isoformat()
 
-    prompt = f"""Ты — медицинский ассистент. Пациент после операции при переломе прикрепил список рекомендаций врача.
+    base_prompt = f"""Ты — медицинский ИИ-ассистент. Пациент после операции при переломе прикрепил список рекомендаций врача.
 Дата начала отсчёта (сегодня): {today_str}.
 
-Сформируй расписание напоминаний в виде единого списка.
-ВАЖНЫЕ ПРАВИЛА:
-1. У напоминаний НЕТ типов и категорий. Напоминание о таблетке, кальции, перевязке или визите к врачу имеет строго одинаковые поля:
-   - "date": конкретная дата в календаре в формате "YYYY-MM-DD" (например, "{today_str}"). Никаких фраз вроде "каждые 2 дня" или "через 10 дней" — высчитай точные календарные даты относительно {today_str}!
-   - "time": конкретное время в формате "HH:MM" (например, "09:00").
-   - "title": краткое название действия.
-   - "description": понятное описание что именно нужно сделать.
-2. Если назначен ежедневный приём препарата (например, кальций или обезболивающее), разверни его по конкретным датам календаря на ближайшие дни.
-3. Если назначены перевязки, снятие повязок/швов и плановый приём врача — вычисли для каждого события точную дату "YYYY-MM-DD" от {today_str}.
+Твоя задача — извлечь ВСЕ рекомендации (приём лекарств, кальция, перевязки, снятие повязок/швов, плановый приём врача) в структурированный JSON.
+Чтобы расписание на длительный срок (например, курс кальция на 1–2 месяца = 30–60 дней) гарантированно повторилось в календаре на каждый нужный день, используй массив "rules":
 
-Верни ТОЛЬКО валидный JSON строго следующего формата (без текста вокруг):
+Поля каждого элемента в "rules":
+- "title": краткое название (строка, например: "Кальций Д3 Никомед" или "Плановый приём травматолога").
+- "description": понятное описание что нужно сделать (строка).
+- "times": список времени в формате "HH:MM" (например, ["09:00", "20:00"] для двукратного приёма или ["11:00"] для разового события).
+- "start_offset_days": через сколько дней от {today_str} начинается действие (0 — если с сегодняшнего дня; 10 — если через 10 дней).
+- "duration_days": сколько всего дней длится курс (например: 60 — если назначено на 2 месяца; 30 — если на 1 месяц; 1 — если это разовый визит к врачу или разовое снятие швов).
+- "interval_days": шаг повторения в днях (1 — если каждый день; 2 — если каждые 2 дня; 7 — если раз в неделю).
+
+Верни ТОЛЬКО валидный JSON строго следующего формата (никакого текста до или после JSON):
 {{
-  "reminders": [
+  "rules": [
     {{
-      "date": "{today_str}",
-      "time": "09:00",
-      "title": "Кальций Д3",
-      "description": "Принять 1 таблетку во время завтрака"
+      "title": "Кальций Д3 Никомед",
+      "description": "Принять 1 таблетку во время еды (курс 2 месяца)",
+      "times": ["09:00", "20:00"],
+      "start_offset_days": 0,
+      "duration_days": 60,
+      "interval_days": 1
     }},
     {{
-      "date": "{(start_date + timedelta(days=2)).isoformat()}",
-      "time": "11:00",
-      "title": "Смена повязки",
-      "description": "Обработать послеоперационный шов антисептиком и сменить стерильную повязку"
+      "title": "Перевязка и обработка шва",
+      "description": "Обработать послеоперационный шов антисептиком и сменить стерильную повязку",
+      "times": ["11:00"],
+      "start_offset_days": 2,
+      "duration_days": 10,
+      "interval_days": 2
     }},
     {{
-      "date": "{(start_date + timedelta(days=10)).isoformat()}",
-      "time": "14:00",
+      "title": "Снятие повязки и швов",
+      "description": "Посетить перевязочный кабинет для снятия послеоперационных швов",
+      "times": ["10:00"],
+      "start_offset_days": 10,
+      "duration_days": 1,
+      "interval_days": 1
+    }},
+    {{
       "title": "Плановый приём травматолога",
-      "description": "Контрольный рентген-снимок и снятие повязки/швов у врача"
+      "description": "Контрольный рентген-снимок и осмотр у врача",
+      "times": ["14:00"],
+      "start_offset_days": 14,
+      "duration_days": 1,
+      "interval_days": 1
     }}
   ]
 }}
@@ -158,34 +335,41 @@ def generate_schedule_once_from_recommendations(
 {recommendations_text}
 """
 
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Authorization": f"Bearer {access_token}",
-    }
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-    }
+    messages = [{"role": "user", "content": base_prompt}]
+    used_model = model
 
-    response = requests.post(CHAT_URL, headers=headers, json=payload, verify=False, timeout=60)
-    response.raise_for_status()
-    raw_content = response.json()["choices"][0]["message"]["content"]
+    # До 2 попыток: если JSON не прошёл Pydantic-валидацию, просим модель исправить ошибку
+    for attempt in range(2):
+        raw_reply, used_model = call_gigachat_with_fallback(
+            access_token,
+            messages,
+            preferred_model=model,
+            temperature=0.1,
+        )
+        try:
+            clean_json = extract_json_string(raw_reply)
+            validated_reminders = expand_and_validate_schedule(clean_json, start_date=start_date)
+            return validated_reminders, used_model
+        except Exception as validation_err:
+            if attempt == 0:
+                messages.append({"role": "assistant", "content": raw_reply})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Твой ответ не прошёл валидацию JSON: {validation_err}. "
+                            "Верни ТОЛЬКО исправленный валидный JSON с массивом 'rules' по схеме."
+                        ),
+                    }
+                )
+            else:
+                raise ValueError(f"Ошибка валидации JSON от модели: {validation_err}")
 
-    match = re.search(r"\{[\s\S]*\}", raw_content)
-    if match:
-        parsed = json.loads(match.group(0))
-        reminders = parsed.get("reminders", [])
-        # Сортируем по конкретной дате и времени
-        reminders.sort(key=lambda x: (x.get("date", ""), x.get("time", "")))
-        return reminders
-
-    raise ValueError("Не удалось распознать JSON со списком напоминаний")
+    raise ValueError("Не удалось сформировать валидное расписание")
 
 
 # =====================================================================
-# 2. ИНИЦИАЛИЗАЦИЯ СОСТОЯНИЯ (SESSION STATE)
+# 3. ИНИЦИАЛИЗАЦИЯ СОСТОЯНИЯ (SESSION STATE)
 # =====================================================================
 
 if "messages" not in st.session_state:
@@ -200,24 +384,33 @@ if "messages" not in st.session_state:
         }
     ]
 
-# Единый список напоминаний: [{"date": "YYYY-MM-DD", "time": "HH:MM", "title": "...", "description": "..."}]
+# Единый список напоминаний без типов: [{"date": "YYYY-MM-DD", "time": "HH:MM", "title": "...", "description": "..."}]
 if "reminders" not in st.session_state:
     st.session_state.reminders = []
 
-# Флаг того, что расписание уже было сформировано один раз при прикреплении рекомендаций
 if "schedule_generated" not in st.session_state:
     st.session_state.schedule_generated = False
 
 if "recommendations_text" not in st.session_state:
     st.session_state.recommendations_text = ""
 
+if "used_model_name" not in st.session_state:
+    st.session_state.used_model_name = clean_value(os.getenv("GIGACHAT_MODEL")) or "GigaChat-Pro"
+
 
 # =====================================================================
-# 3. ПРОСТОЙ ИНТЕРФЕЙС (UI STREAMLIT — 2 КОЛОНКИ)
+# 4. ПРОСТОЙ ИНТЕРФЕЙС (UI STREAMLIT — 2 КОЛОНКИ)
 # =====================================================================
 
 st.set_page_config(page_title="AI Fracture Recovery", layout="wide")
-st.title("Послеоперационное сопровождение при переломах (GigaChat)")
+st.title("Послеоперационное сопровождение при переломах (GigaChat-Pro)")
+
+# Выбор модели Сбера (по умолчанию GigaChat-Pro)
+selected_model = st.selectbox(
+    "Модель GigaChat:",
+    options=["GigaChat-Pro", "GigaChat-Max", "GigaChat"],
+    index=0,
+)
 
 col_chat, col_schedule = st.columns([1, 1])
 
@@ -236,7 +429,6 @@ with col_chat:
 
         credentials = get_gigachat_credentials()
         scope = clean_value(os.getenv("GIGACHAT_SCOPE")) or "GIGACHAT_API_PERS"
-        model = clean_value(os.getenv("GIGACHAT_MODEL")) or "GigaChat"
 
         if not credentials:
             reply = "Ошибка: не заданы ключи GigaChat в файле .env"
@@ -247,7 +439,7 @@ with col_chat:
                     token,
                     st.session_state.messages,
                     recommendations_text=st.session_state.recommendations_text,
-                    model=model,
+                    model=selected_model,
                 )
             except Exception as e:
                 reply = f"Ошибка обращения к GigaChat: {e}"
@@ -260,17 +452,16 @@ with col_chat:
 with col_schedule:
     st.subheader("2. Календарное расписание (Daily Check-in)")
 
-    # Расписание формируется ИИ ТОЛЬКО ОДИН РАЗ при прикреплении списка рекомендаций
     if not st.session_state.schedule_generated:
-        st.info("Прикрепите файл с рекомендациями врача (.txt) или вставьте текст выписки, чтобы ИИ сформировал календарное расписание.")
+        st.info("Прикрепите файл с рекомендациями врача (.txt) или вставьте текст выписки. Расписание формируется ИИ один раз с валидацией JSON и разворачиванием курсов на весь срок (включая курсы на 1–2 месяца).")
 
         uploaded_file = st.file_uploader("Прикрепить файл рекомендаций (.txt)", type=["txt"])
         default_sample = (
             "Выписка: Операция остеосинтеза лодыжки.\n"
             "Рекомендации:\n"
-            "1. Кальций Д3 Никомед — по 1 таблетке утром (09:00) и вечером (20:00) ежедневно.\n"
+            "1. Кальций Д3 Никомед — по 1 таблетке утром (09:00) и вечером (20:00) ежедневно в течение 2 месяцев (60 дней).\n"
             "2. Кеторол — 1 таблетка в 13:00 при болях первые 3 дня.\n"
-            "3. Перевязка и обработка шва антисептиком — через 2 дня и через 4 дня.\n"
+            "3. Перевязка и обработка шва антисептиком — каждые 2 дня в течение 10 дней.\n"
             "4. Снятие повязки и швов — через 10 дней.\n"
             "5. Плановый приём травматолога и контрольный рентген — через 14 дней."
         )
@@ -284,43 +475,45 @@ with col_schedule:
         if st.button("Прикрепить рекомендации и сформировать расписание"):
             credentials = get_gigachat_credentials()
             scope = clean_value(os.getenv("GIGACHAT_SCOPE")) or "GIGACHAT_API_PERS"
-            model = clean_value(os.getenv("GIGACHAT_MODEL")) or "GigaChat"
 
             if not credentials:
                 st.error("Ошибка: не заданы ключи GigaChat в файле .env")
             elif not rec_input.strip():
                 st.warning("Добавьте текст рекомендаций.")
             else:
-                with st.spinner("ИИ формирует расписание по конкретным датам календаря..."):
+                with st.spinner("ИИ анализирует выписку, валидирует JSON и строит календарь..."):
                     try:
                         token = get_access_token(credentials, scope=scope)
-                        st.session_state.reminders = generate_schedule_once_from_recommendations(
+                        reminders_list, used_model = generate_schedule_once_from_recommendations(
                             token,
                             rec_input.strip(),
                             start_date=date.today(),
-                            model=model,
+                            model=selected_model,
                         )
+                        st.session_state.reminders = reminders_list
+                        st.session_state.used_model_name = used_model
                         st.session_state.recommendations_text = rec_input.strip()
                         st.session_state.schedule_generated = True
                         st.rerun()
                     except Exception as e:
                         st.error(f"Ошибка генерации расписания: {e}")
     else:
-        st.success("Рекомендации прикреплены. Расписание сформировано по конкретным датам календаря.")
+        st.success(
+            f"Расписание сформировано и проверено валидатором (Модель: {st.session_state.used_model_name}, "
+            f"всего напоминаний в календаре: {len(st.session_state.reminders)})."
+        )
 
-        # Фильтр по дате календаря или показ всех дат
-        show_all = st.checkbox("Показать все запланированные даты календаря", value=True)
-        selected_date = None
-        if not show_all:
-            selected_date = st.date_input("Выберите дату в календаре:", value=date.today()).isoformat()
+        # По умолчанию фильтр по конкретной дате календаря, чтобы удобно смотреть расписание на 2 месяца
+        show_all = st.checkbox("Показать все даты единым списком", value=False)
+        selected_date_str = st.date_input("Выберите дату в календаре:", value=date.today()).isoformat()
 
         filtered_reminders = [
             r for r in st.session_state.reminders
-            if show_all or r.get("date") == selected_date
+            if show_all or r.get("date") == selected_date_str
         ]
 
         if not filtered_reminders:
-            st.write("На выбранную дату напоминаний нет.")
+            st.write(f"На дату {selected_date_str} напоминаний нет.")
         else:
             current_date_header = None
             for idx, item in enumerate(filtered_reminders):

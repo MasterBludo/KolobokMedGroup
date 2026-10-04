@@ -17,7 +17,7 @@ let cachedToken: { token: string; expiresAt: number } | null = null;
 function resolveGigaChatCredentials(): string | null {
   const credentials = process.env.GIGACHAT_CREDENTIALS?.trim();
   if (credentials && credentials !== "YOUR_GIGACHAT_AUTH_KEY") {
-    return credentials;
+    return credentials.replace(/^basic\s+/i, "").trim();
   }
 
   const clientId = process.env.GIGACHAT_CLIENT_ID?.trim();
@@ -77,15 +77,17 @@ async function getGigaChatToken(credentials: string, scope: string): Promise<str
   });
 }
 
-async function callGigaChat(
+async function callSingleGigaChatModel(
   token: string,
-  messages: Array<{ role: string; content: string }>
+  model: string,
+  messages: Array<{ role: string; content: string }>,
+  temperature = 0.2
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify({
-      model: "GigaChat",
+      model,
       messages,
-      temperature: 0.7,
+      temperature,
     });
 
     const req = https.request(
@@ -125,13 +127,188 @@ async function callGigaChat(
   });
 }
 
+async function callGigaChatWithFallback(
+  token: string,
+  messages: Array<{ role: string; content: string }>,
+  preferredModel = "GigaChat-Pro",
+  temperature = 0.2
+): Promise<{ reply: string; usedModel: string }> {
+  const modelsToTry = [preferredModel];
+  if (preferredModel !== "GigaChat") {
+    modelsToTry.push("GigaChat");
+  }
+
+  let lastErr: unknown = null;
+  for (const currentModel of modelsToTry) {
+    try {
+      const reply = await callSingleGigaChatModel(token, currentModel, messages, temperature);
+      return { reply, usedModel: currentModel };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
+}
+
+function addDays(baseIso: string, days: number): string {
+  const d = new Date(`${baseIso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+interface ReminderItem {
+  date: string;
+  time: string;
+  title: string;
+  description: string;
+}
+
+interface RuleItem {
+  title: string;
+  description: string;
+  times?: string[];
+  exact_date?: string;
+  start_offset_days?: number;
+  duration_days?: number;
+  interval_days?: number;
+}
+
+function normalizeTime(timeStr: string): string {
+  const match = String(timeStr || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return "09:00";
+  const hh = Math.min(23, Math.max(0, Number(match[1])));
+  const mm = Math.min(59, Math.max(0, Number(match[2])));
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+}
+
+function isValidIsoDate(dateStr: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(dateStr) && !Number.isNaN(Date.parse(`${dateStr}T00:00:00Z`));
+}
+
+function expandAndValidateSchedule(rawText: string, startDate: string): ReminderItem[] {
+  const cleaned = rawText.replace(/```(?:json)?/gi, "").replace(/```/g, "").trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (!match) {
+    throw new Error("В ответе модели не найден JSON-объект");
+  }
+  const jsonStr = match[0].replace(/,\s*([}\]])/g, "$1");
+  const parsed = JSON.parse(jsonStr) as {
+    rules?: RuleItem[];
+    reminders?: ReminderItem[];
+  };
+
+  const results: ReminderItem[] = [];
+
+  if (Array.isArray(parsed.reminders)) {
+    for (const item of parsed.reminders) {
+      if (item && item.title && item.description && isValidIsoDate(String(item.date || ""))) {
+        results.push({
+          date: String(item.date).trim(),
+          time: normalizeTime(item.time),
+          title: String(item.title).trim(),
+          description: String(item.description).trim(),
+        });
+      }
+    }
+  }
+
+  if (Array.isArray(parsed.rules)) {
+    for (const rule of parsed.rules) {
+      if (!rule || !rule.title || !rule.description) continue;
+      const startOffset = Math.max(0, Math.min(365, Number(rule.start_offset_days ?? 0)));
+      const durationDays = Math.max(1, Math.min(180, Number(rule.duration_days ?? 1)));
+      const intervalDays = Math.max(1, Math.min(90, Number(rule.interval_days ?? 1)));
+      const times = Array.isArray(rule.times) && rule.times.length > 0 ? rule.times : ["09:00"];
+
+      const ruleBaseDate =
+        rule.exact_date && isValidIsoDate(rule.exact_date)
+          ? rule.exact_date
+          : addDays(startDate, startOffset);
+
+      for (let d = 0; d < durationDays; d += intervalDays) {
+        const concreteDate = addDays(ruleBaseDate, d);
+        for (const t of times) {
+          results.push({
+            date: concreteDate,
+            time: normalizeTime(t),
+            title: String(rule.title).trim(),
+            description: String(rule.description).trim(),
+          });
+        }
+      }
+    }
+  }
+
+  if (results.length === 0) {
+    throw new Error("Список напоминаний после валидации пуст");
+  }
+
+  const uniqueMap = new Map<string, ReminderItem>();
+  for (const r of results) {
+    uniqueMap.set(`${r.date}|${r.time}|${r.title}`, r);
+  }
+
+  const finalReminders = Array.from(uniqueMap.values());
+  finalReminders.sort((a, b) =>
+    `${a.date} ${a.time} ${a.title}`.localeCompare(`${b.date} ${b.time} ${b.title}`)
+  );
+  return finalReminders;
+}
+
+function buildFallbackReminders(startDate: string): ReminderItem[] {
+  const defaultRulesJson = JSON.stringify({
+    rules: [
+      {
+        title: "Кальций Д3 Никомед",
+        description: "Принять 1 таблетку во время еды (курс 2 месяца)",
+        times: ["09:00", "20:00"],
+        start_offset_days: 0,
+        duration_days: 60,
+        interval_days: 1,
+      },
+      {
+        title: "Кеторол",
+        description: "Принять 1 таблетку в 13:00 при болях (первые 3 дня)",
+        times: ["13:00"],
+        start_offset_days: 0,
+        duration_days: 3,
+        interval_days: 1,
+      },
+      {
+        title: "Перевязка и обработка шва",
+        description: "Обработать послеоперационный шов антисептиком и сменить стерильную повязку",
+        times: ["11:00"],
+        start_offset_days: 2,
+        duration_days: 10,
+        interval_days: 2,
+      },
+      {
+        title: "Снятие повязки и швов",
+        description: "Посетить перевязочный кабинет для снятия послеоперационных швов",
+        times: ["10:00"],
+        start_offset_days: 10,
+        duration_days: 1,
+        interval_days: 1,
+      },
+      {
+        title: "Плановый приём травматолога",
+        description: "Контрольный рентген-снимок и осмотр у лечащего врача-травматолога",
+        times: ["14:00"],
+        start_offset_days: 14,
+        duration_days: 1,
+        interval_days: 1,
+      },
+    ],
+  });
+  return expandAndValidateSchedule(defaultRulesJson, startDate);
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
   app.use(express.json());
 
-  // Возвращает файлы первого коммита для GitHub (README.md, app.py, requirements.txt, .env.example)
   app.get("/api/files", (_req, res) => {
     const fileNames = ["README.md", "app.py", "requirements.txt", ".env.example"];
     const files: Record<string, string> = {};
@@ -148,10 +325,67 @@ async function startServer() {
     });
   });
 
-  // Простой эндпоинт диалога с GigaChat
+  app.post("/api/generate-schedule", async (req, res) => {
+    const { recommendationsText, startDate, model } = req.body as {
+      recommendationsText?: string;
+      startDate?: string;
+      model?: string;
+    };
+
+    const baseDate = startDate || new Date().toISOString().slice(0, 10);
+    const preferredModel = model || process.env.GIGACHAT_MODEL || "GigaChat-Pro";
+    const credentials = resolveGigaChatCredentials();
+    const scope = process.env.GIGACHAT_SCOPE || "GIGACHAT_API_PERS";
+
+    if (!credentials) {
+      res.json({
+        reminders: buildFallbackReminders(baseDate),
+        usedModel: `${preferredModel} (демо-валидатор)`,
+      });
+      return;
+    }
+
+    try {
+      const token = await getGigaChatToken(credentials, scope);
+      const prompt = `Ты — медицинский ИИ-ассистент. Пациент после операции при переломе прикрепил список рекомендаций врача.
+Дата начала отсчёта (сегодня): ${baseDate}.
+
+Извлеки ВСЕ рекомендации (приём лекарств, кальция, перевязки, снятие повязок/швов, плановый приём врача) в структурированный JSON с массивом "rules", чтобы длительные курсы (например, на 2 месяца = 60 дней) развернулись на каждый день календаря:
+{
+  "rules": [
+    {
+      "title": "Кальций Д3 Никомед",
+      "description": "Принять 1 таблетку во время еды (курс 2 месяца)",
+      "times": ["09:00", "20:00"],
+      "start_offset_days": 0,
+      "duration_days": 60,
+      "interval_days": 1
+    }
+  ]
+}
+
+Список рекомендаций пациента:
+${recommendationsText || ""}`;
+
+      const { reply, usedModel } = await callGigaChatWithFallback(
+        token,
+        [{ role: "user", content: prompt }],
+        preferredModel,
+        0.1
+      );
+      const reminders = expandAndValidateSchedule(reply, baseDate);
+      res.json({ reminders, usedModel });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      res.status(500).json({ error: `Ошибка генерации расписания: ${message}` });
+    }
+  });
+
   app.post("/api/chat", async (req, res) => {
-    const { messages } = req.body as {
+    const { messages, recommendationsText, model } = req.body as {
       messages?: Array<{ role: string; content: string }>;
+      recommendationsText?: string;
+      model?: string;
     };
 
     if (!messages || !Array.isArray(messages)) {
@@ -159,20 +393,35 @@ async function startServer() {
       return;
     }
 
+    const preferredModel = model || process.env.GIGACHAT_MODEL || "GigaChat-Pro";
     const credentials = resolveGigaChatCredentials();
     const scope = process.env.GIGACHAT_SCOPE || "GIGACHAT_API_PERS";
 
     if (!credentials) {
       res.json({
         reply:
-          "Демо-режим: укажите GIGACHAT_CREDENTIALS или пару GIGACHAT_CLIENT_ID / GIGACHAT_CLIENT_SECRET в .env.",
+          "Демо-режим предпросмотра: при запуске локально (`streamlit run app.py`) с вашим `.env` используется выбранная модель GigaChat-Pro / GigaChat.",
       });
       return;
     }
 
     try {
       const token = await getGigaChatToken(credentials, scope);
-      const reply = await callGigaChat(token, messages);
+      const contextNote = recommendationsText
+        ? `\nПрикреплённые рекомендации пациента:\n${recommendationsText}`
+        : "";
+      const systemPrompt = {
+        role: "system",
+        content:
+          "Ты — медицинский цифровой помощник по послеоперационному сопровождению пациентов с переломами. Отвечай вежливо, кратко и понятно." +
+          contextNote,
+      };
+      const { reply } = await callGigaChatWithFallback(
+        token,
+        [systemPrompt, ...messages],
+        preferredModel,
+        0.5
+      );
       res.json({ reply });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
