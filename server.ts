@@ -5,9 +5,9 @@ import fs from "fs";
 import os from "os";
 import https from "https";
 import crypto from "crypto";
-import { spawn } from "child_process";
 import dotenv from "dotenv";
 import { parseScheduleJson } from "./schedule-json";
+import { runPythonScript } from "./python-runtime";
 
 dotenv.config();
 
@@ -356,34 +356,11 @@ async function startServer() {
       try {
         fs.writeFileSync(filePath, req.body);
         const scriptPath = path.join(process.cwd(), "ocrtest.py");
-        const text = await new Promise<string>((resolve, reject) => {
-          const python = spawn(
-            process.env.PYTHON_EXECUTABLE || "python",
-            [scriptPath, "--text-only", filePath],
-            {
-              windowsHide: true,
-              env: {
-                ...process.env,
-                PYTHONIOENCODING: "utf-8",
-                PYTHONUTF8: "1",
-              },
-            }
-          );
-          let output = "";
-          let errorOutput = "";
-          python.stdout.setEncoding("utf8");
-          python.stderr.setEncoding("utf8");
-          python.stdout.on("data", (chunk: string) => (output += chunk));
-          python.stderr.on("data", (chunk: string) => (errorOutput += chunk));
-          python.on("error", reject);
-          python.on("close", (code) => {
-            if (code === 0) {
-              resolve(output.trim());
-            } else {
-              reject(new Error(errorOutput.trim() || `OCR завершился с кодом ${code}`));
-            }
-          });
-        });
+        const text = await runPythonScript(
+          scriptPath,
+          filePath,
+          process.env.PYTHON_EXECUTABLE
+        );
         res.json({ text });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
