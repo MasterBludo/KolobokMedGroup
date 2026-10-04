@@ -226,3 +226,15 @@ def evaluate_recovery(state: dict, protocol: dict) -> TriageStatus:
    ```bash
    streamlit run app.py
    ```
+
+## 5. Веб-интерфейс Recovery
+
+React-интерфейс из `UI/` запускается вместе с Express API и Vite из корня проекта:
+
+1. Установите зависимости Node.js: `npm install`.
+2. Укажите учётные данные GigaChat в `.env` (см. `.env.example`).
+3. Запустите `npm run dev` и откройте `http://localhost:3000`.
+
+Чат, распознавание PDF и изображений и формирование задач используют API `/api/chat`,
+`/api/ocr` и `/api/generate-schedule`. Для OCR также требуется Python и зависимости
+из `requirements.txt`.

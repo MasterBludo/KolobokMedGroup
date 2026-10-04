@@ -7,6 +7,7 @@ import https from "https";
 import crypto from "crypto";
 import { spawn } from "child_process";
 import dotenv from "dotenv";
+import { parseScheduleJson } from "./schedule-json";
 
 dotenv.config();
 
@@ -165,76 +166,84 @@ interface ReminderItem {
   description: string;
 }
 
-interface RuleItem {
-  title: string;
-  description: string;
-  times?: string[];
-  exact_date?: string;
-  start_offset_days?: number;
-  duration_days?: number;
-  interval_days?: number;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function normalizeTime(timeStr: string): string {
-  const match = String(timeStr || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+function normalizeTime(timeValue: unknown): string {
+  const match = String(timeValue || "").trim().match(/^(\d{1,2}):(\d{2})$/);
   if (!match) return "09:00";
   const hh = Math.min(23, Math.max(0, Number(match[1])));
   const mm = Math.min(59, Math.max(0, Number(match[2])));
   return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
 }
 
-function isValidIsoDate(dateStr: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(dateStr) && !Number.isNaN(Date.parse(`${dateStr}T00:00:00Z`));
+function isValidIsoDate(dateStr: unknown): dateStr is string {
+  return (
+    typeof dateStr === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(dateStr) &&
+    !Number.isNaN(Date.parse(`${dateStr}T00:00:00Z`))
+  );
 }
 
 function expandAndValidateSchedule(rawText: string, startDate: string): ReminderItem[] {
-  const cleaned = rawText.replace(/```(?:json)?/gi, "").replace(/```/g, "").trim();
-  const match = cleaned.match(/\{[\s\S]*\}/);
-  if (!match) {
-    throw new Error("В ответе модели не найден JSON-объект");
-  }
-  const jsonStr = match[0].replace(/,\s*([}\]])/g, "$1");
-  const parsed = JSON.parse(jsonStr) as {
-    rules?: RuleItem[];
-    reminders?: ReminderItem[];
-  };
+  const parsed = parseScheduleJson(rawText);
 
   const results: ReminderItem[] = [];
 
   if (Array.isArray(parsed.reminders)) {
-    for (const item of parsed.reminders) {
-      if (item && item.title && item.description && isValidIsoDate(String(item.date || ""))) {
+    for (const rawItem of parsed.reminders) {
+      if (
+        isRecord(rawItem) &&
+        typeof rawItem.title === "string" &&
+        rawItem.title.trim() &&
+        typeof rawItem.description === "string" &&
+        rawItem.description.trim() &&
+        isValidIsoDate(rawItem.date)
+      ) {
         results.push({
-          date: String(item.date).trim(),
-          time: normalizeTime(item.time),
-          title: String(item.title).trim(),
-          description: String(item.description).trim(),
+          date: rawItem.date.trim(),
+          time: normalizeTime(rawItem.time),
+          title: rawItem.title.trim(),
+          description: rawItem.description.trim(),
         });
       }
     }
   }
 
   if (Array.isArray(parsed.rules)) {
-    for (const rule of parsed.rules) {
-      if (!rule || !rule.title || !rule.description) continue;
-      const startOffset = Math.max(0, Math.min(365, Number(rule.start_offset_days ?? 0)));
-      const durationDays = Math.max(1, Math.min(180, Number(rule.duration_days ?? 1)));
-      const intervalDays = Math.max(1, Math.min(90, Number(rule.interval_days ?? 1)));
-      const times = Array.isArray(rule.times) && rule.times.length > 0 ? rule.times : ["09:00"];
+    for (const rawRule of parsed.rules) {
+      if (
+        !isRecord(rawRule) ||
+        typeof rawRule.title !== "string" ||
+        !rawRule.title.trim() ||
+        typeof rawRule.description !== "string" ||
+        !rawRule.description.trim()
+      ) {
+        continue;
+      }
+      const startOffset = Math.max(0, Math.min(365, Number(rawRule.start_offset_days ?? 0)));
+      const durationDays = Math.max(1, Math.min(180, Number(rawRule.duration_days ?? 1)));
+      const intervalDays = Math.max(1, Math.min(90, Number(rawRule.interval_days ?? 1)));
+      const times =
+        Array.isArray(rawRule.times) && rawRule.times.length > 0
+          ? rawRule.times.filter((time): time is string => typeof time === "string")
+          : ["09:00"];
+      const validTimes = times.length > 0 ? times : ["09:00"];
 
       const ruleBaseDate =
-        rule.exact_date && isValidIsoDate(rule.exact_date)
-          ? rule.exact_date
+        isValidIsoDate(rawRule.exact_date)
+          ? rawRule.exact_date
           : addDays(startDate, startOffset);
 
       for (let d = 0; d < durationDays; d += intervalDays) {
         const concreteDate = addDays(ruleBaseDate, d);
-        for (const t of times) {
+        for (const t of validTimes) {
           results.push({
             date: concreteDate,
             time: normalizeTime(t),
-            title: String(rule.title).trim(),
-            description: String(rule.description).trim(),
+            title: rawRule.title.trim(),
+            description: rawRule.description.trim(),
           });
         }
       }
@@ -351,7 +360,14 @@ async function startServer() {
           const python = spawn(
             process.env.PYTHON_EXECUTABLE || "python",
             [scriptPath, "--text-only", filePath],
-            { windowsHide: true }
+            {
+              windowsHide: true,
+              env: {
+                ...process.env,
+                PYTHONIOENCODING: "utf-8",
+                PYTHONUTF8: "1",
+              },
+            }
           );
           let output = "";
           let errorOutput = "";
@@ -403,7 +419,8 @@ async function startServer() {
       const prompt = `Ты — медицинский ИИ-ассистент. Пациент после операции при переломе прикрепил список рекомендаций врача.
 Дата начала отсчёта (сегодня): ${baseDate}.
 
-Извлеки ВСЕ рекомендации (приём лекарств, кальция, перевязки, снятие повязок/швов, плановый приём врача) в структурированный JSON с массивом "rules", чтобы длительные курсы (например, на 2 месяца = 60 дней) развернулись на каждый день календаря:
+Извлеки ВСЕ рекомендации (приём лекарств, кальция, перевязки, снятие повязок/швов, плановый приём врача) в структурированный JSON с массивом "rules", чтобы длительные курсы (например, на 2 месяца = 60 дней) развернулись на каждый день календаря.
+Верни только один корректный JSON-объект без Markdown, пояснений и текста до или после JSON:
 {
   "rules": [
     {
@@ -420,13 +437,35 @@ async function startServer() {
 Список рекомендаций пациента:
 ${recommendationsText || ""}`;
 
-      const { reply, usedModel } = await callGigaChatWithFallback(
+      const initialResponse = await callGigaChatWithFallback(
         token,
         [{ role: "user", content: prompt }],
         preferredModel,
         0.1
       );
-      const reminders = expandAndValidateSchedule(reply, baseDate);
+      let usedModel = initialResponse.usedModel;
+      let reminders: ReminderItem[];
+      try {
+        reminders = expandAndValidateSchedule(initialResponse.reply, baseDate);
+      } catch (validationError) {
+        const validationMessage =
+          validationError instanceof Error ? validationError.message : String(validationError);
+        const repairedResponse = await callGigaChatWithFallback(
+          token,
+          [
+            { role: "user", content: prompt },
+            { role: "assistant", content: initialResponse.reply },
+            {
+              role: "user",
+              content: `Предыдущий ответ не удалось разобрать или проверить: ${validationMessage}. Исправь ответ и верни только один корректный JSON-объект с непустым массивом "rules" по указанной схеме. Не добавляй Markdown или пояснения.`,
+            },
+          ],
+          initialResponse.usedModel,
+          0.1
+        );
+        reminders = expandAndValidateSchedule(repairedResponse.reply, baseDate);
+        usedModel = repairedResponse.usedModel;
+      }
       res.json({ reminders, usedModel });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -453,7 +492,7 @@ ${recommendationsText || ""}`;
     if (!credentials) {
       res.json({
         reply:
-          "Демо-режим предпросмотра: при запуске локально (`streamlit run app.py`) с вашим `.env` используется выбранная модель GigaChat-Pro / GigaChat.",
+          "Демо-режим: добавьте GIGACHAT_CREDENTIALS или GIGACHAT_CLIENT_ID и GIGACHAT_CLIENT_SECRET в файл .env на сервере, чтобы включить ответы GigaChat.",
       });
       return;
     }

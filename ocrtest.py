@@ -1,14 +1,38 @@
 import os
 import argparse
 import sys
+
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import pymupdf
 import numpy as np
 from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
 from huggingface_hub import hf_hub_download
 
-os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
+class DictionaryAwareRapidOCR(RapidOCR):
+    def __init__(self, character_dict_path: str, **kwargs):
+        self.character_dict_path = character_dict_path
+        super().__init__(**kwargs)
+
+    def init_module(self, module_name: str, class_name: str):
+        module_class = super().init_module(module_name, class_name)
+        if module_name == "ch_ppocr_v3_rec" and class_name == "TextRecognizer":
+            character_dict_path = self.character_dict_path
+
+            class TextRecognizerWithDictionary(module_class):
+                def __init__(self, config):
+                    super().__init__({**config, "keys_path": character_dict_path})
+
+            return TextRecognizerWithDictionary
+        return module_class
 
 
 class DocumentOcrEngine:
@@ -18,16 +42,16 @@ class DocumentOcrEngine:
         rec_path = hf_hub_download(repo_id="monkt/paddleocr-onnx", filename="languages/eslav/rec.onnx")
         dict_path = hf_hub_download(repo_id="monkt/paddleocr-onnx", filename="languages/eslav/dict.txt")
 
-        self.ocr = RapidOCR(
+        self.ocr = DictionaryAwareRapidOCR(
+            character_dict_path=dict_path,
             det_model_path=det_path,
-            rec_model_path=rec_path,
-            rec_keys_path=dict_path
+            rec_model_path=rec_path
         )
 
         # Сниженные пороги детектора
-        self.ocr.text_det.box_thresh = 0.25
-        self.ocr.text_det.thresh = 0.20
-        self.ocr.text_det.unclip_ratio = 1.6
+        self.ocr.text_detector.box_thresh = 0.25
+        self.ocr.text_detector.thresh = 0.20
+        self.ocr.text_detector.unclip_ratio = 1.6
         print("OCR готов к работе!\n", file=sys.stderr)
 
     def _cluster_words_into_lines(self, ocr_results: list) -> str:
