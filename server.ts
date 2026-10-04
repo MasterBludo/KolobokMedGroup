@@ -351,9 +351,10 @@ async function startServer() {
         return;
       }
 
-      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "kolobok-ocr-"));
-      const filePath = path.join(tempDir, `statement.${extension}`);
+      let tempDir: string | null = null;
       try {
+        tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "kolobok-ocr-"));
+        const filePath = path.join(tempDir, `statement.${extension}`);
         fs.writeFileSync(filePath, req.body);
         const scriptPath = path.join(process.cwd(), "ocrtest.py");
         const text = await runPythonScript(
@@ -366,7 +367,9 @@ async function startServer() {
         const message = error instanceof Error ? error.message : String(error);
         res.status(500).json({ error: `Не удалось распознать документ: ${message}` });
       } finally {
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        if (tempDir) {
+          fs.rmSync(tempDir, { recursive: true, force: true });
+        }
       }
     }
   );
@@ -511,6 +514,29 @@ ${recommendationsText || ""}`;
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
+
+  app.use(
+    (
+      error: unknown,
+      req: express.Request,
+      res: express.Response,
+      next: express.NextFunction
+    ) => {
+      if (!req.path.startsWith("/api/") || res.headersSent) {
+        next(error);
+        return;
+      }
+
+      const status =
+        typeof error === "object" && error !== null && "status" in error &&
+        typeof error.status === "number"
+          ? error.status
+          : 500;
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`API error (${status}):`, error);
+      res.status(status).json({ error: message });
+    }
+  );
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);

@@ -7,6 +7,13 @@ interface Message {
   text: string;
 }
 
+interface ChatInputProps {
+  disabled: boolean;
+  resetKey: number;
+  onHasInputChange: (hasInput: boolean) => void;
+  onSendMessage: (message: string) => void;
+}
+
 interface TaskItem {
   id: string;
   text: string;
@@ -38,6 +45,68 @@ const OPERATIONS_LIST = [
   'Эндопротезирование коленного сустава',
   'Удаление грыжи межпозвоночного диска',
 ];
+
+function ChatInput({
+  disabled,
+  resetKey,
+  onHasInputChange,
+  onSendMessage,
+}: ChatInputProps) {
+  const [inputValue, setInputValue] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    setInputValue('');
+  }, [resetKey]);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = inputValue.trim();
+    if (!trimmed || disabled) return;
+
+    onSendMessage(trimmed);
+    setInputValue('');
+    onHasInputChange(false);
+    inputRef.current?.focus();
+  };
+
+  return (
+    <motion.form
+      layout
+      onSubmit={handleSubmit}
+      transition={{ type: 'spring', stiffness: 320, damping: 32 }}
+      className="w-full max-w-[584px] h-[68px] bg-white rounded-[22px] border border-[#EFEFEF] shadow-[0_12px_34px_rgba(0,0,0,0.06)] pl-5 pr-3 flex items-center justify-between gap-3 relative z-20"
+    >
+      <input
+        ref={inputRef}
+        type="text"
+        value={inputValue}
+        onChange={(e) => {
+          const nextValue = e.target.value;
+          if ((inputValue.length === 0) !== (nextValue.length === 0)) {
+            onHasInputChange(nextValue.length > 0);
+          }
+          setInputValue(nextValue);
+        }}
+        disabled={disabled}
+        placeholder="или начните вводить"
+        className="flex-1 bg-transparent text-[15px] text-[#1A2E2B] placeholder:text-[#B0B7B5] focus:outline-none"
+      />
+      <button
+        type="submit"
+        disabled={!inputValue.trim() || disabled}
+        aria-label="Отправить"
+        className={`w-[44px] h-[44px] rounded-full flex items-center justify-center shrink-0 transition-all ${
+          inputValue.trim().length > 0 && !disabled
+            ? 'bg-[#A8C7C7] hover:bg-[#99BABA] active:scale-95 text-[#1A2E2B] opacity-100 cursor-pointer'
+            : 'bg-[#A8C7C7]/55 text-[#1A2E2B]/45 opacity-60 cursor-default'
+        }`}
+      >
+        <BowlOfHygieiaIcon className="w-[21px] h-[21px]" />
+      </button>
+    </motion.form>
+  );
+}
 
 /**
  * Custom SVG Icons matching the reference screenshots
@@ -177,7 +246,8 @@ export default function App() {
   const [settingsNameInput, setSettingsNameInput] = useState<string>('');
 
   // Chat & Input states
-  const [inputValue, setInputValue] = useState<string>('');
+  const [hasInput, setHasInput] = useState<boolean>(false);
+  const [inputResetKey, setInputResetKey] = useState<number>(0);
   const [isSendingMessage, setIsSendingMessage] = useState<boolean>(false);
   const [isUploadingStatement, setIsUploadingStatement] = useState<boolean>(false);
   const [isGeneratingSchedule, setIsGeneratingSchedule] = useState<boolean>(false);
@@ -204,13 +274,11 @@ export default function App() {
   const [isAddingTask, setIsAddingTask] = useState<boolean>(false);
   const [newTaskText, setNewTaskText] = useState<string>('');
   const tasksTimeoutRef = useRef<number | null>(null);
-
   const chatEndRef = useRef<HTMLDivElement | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
 
-  // Transition to chat mode immediately when typing starts or messages exist
+  // Keep chat mode stable while the input changes; only empty/non-empty boundaries matter.
   const isChatMode =
-    inputValue.length > 0 ||
+    hasInput ||
     messages.length > 1 ||
     isSendingMessage ||
     isUploadingStatement ||
@@ -222,9 +290,7 @@ export default function App() {
     }
   }, [messages.length, isChatMode]);
 
-  const handleSendMessage = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    const trimmed = inputValue.trim();
+  const handleSendMessage = async (trimmed: string) => {
     if (
       !trimmed ||
       isSendingMessage ||
@@ -243,9 +309,7 @@ export default function App() {
 
     const nextMessages = [...messages, userMsg];
     setMessages(nextMessages);
-    setInputValue('');
     setIsSendingMessage(true);
-    inputRef.current?.focus();
 
     const context = [
       selectedOperation ? `Операция: ${selectedOperation}` : '',
@@ -300,7 +364,8 @@ export default function App() {
 
   const handleResetToStart = () => {
     setCurrentScreen('main');
-    setInputValue('');
+    setHasInput(false);
+    setInputResetKey((key) => key + 1);
     setMessages([
       {
         id: 'welcome',
@@ -398,7 +463,40 @@ export default function App() {
           body: file,
         }
       );
-      const ocrData: { text?: string; error?: string } = await ocrResponse.json();
+      const responseBody = await ocrResponse.text();
+      if (!responseBody.trim()) {
+        throw new Error(
+          ocrResponse.ok
+            ? 'Сервис распознавания вернул пустой ответ.'
+            : `Сервис распознавания недоступен (HTTP ${ocrResponse.status}). Запустите приложение командой npm run dev.`
+        );
+      }
+
+      let ocrData: { text?: string; error?: string };
+      try {
+        const parsedData: unknown = JSON.parse(responseBody);
+        if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) {
+          throw new Error('Сервис распознавания вернул некорректный ответ.');
+        }
+        const responseData = parsedData as Record<string, unknown>;
+        if (
+          (responseData.text !== undefined && typeof responseData.text !== 'string') ||
+          (responseData.error !== undefined && typeof responseData.error !== 'string')
+        ) {
+          throw new Error('Сервис распознавания вернул некорректный ответ.');
+        }
+        ocrData = {
+          text: typeof responseData.text === 'string' ? responseData.text : undefined,
+          error: typeof responseData.error === 'string' ? responseData.error : undefined,
+        };
+      } catch (error) {
+        if (error instanceof SyntaxError) {
+          throw new Error(
+            `Сервис распознавания вернул некорректный ответ (HTTP ${ocrResponse.status}).`
+          );
+        }
+        throw error;
+      }
       if (!ocrResponse.ok) {
         throw new Error(ocrData.error || 'Не удалось распознать выписку.');
       }
@@ -421,7 +519,11 @@ export default function App() {
     } catch (error) {
       setAttachedFileName(null);
       const errorMessage =
-        error instanceof Error ? error.message : 'Не удалось распознать выписку.';
+        error instanceof TypeError
+          ? 'Сервер приложения недоступен. Запустите его командой npm run dev и повторите попытку.'
+          : error instanceof Error
+            ? error.message
+            : 'Не удалось распознать выписку.';
       setMessages((prev) => [
         ...prev,
         {
@@ -1392,48 +1494,17 @@ export default function App() {
         )}
 
         {/* Shared Persistent Input Form (static at bottom in chat mode, chat scrolls underneath it) */}
-        <motion.form
-          layout
-          onSubmit={handleSendMessage}
-          transition={{ type: 'spring', stiffness: 320, damping: 32 }}
-          className="w-full max-w-[584px] h-[68px] bg-white rounded-[22px] border border-[#EFEFEF] shadow-[0_12px_34px_rgba(0,0,0,0.06)] pl-5 pr-3 flex items-center justify-between gap-3 relative z-20"
-        >
-          <input
-            ref={inputRef}
-            type="text"
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            disabled={
-              isSendingMessage ||
-              isUploadingStatement ||
-              isGeneratingSchedule ||
-              pendingStatementText !== null
-            }
-            placeholder="или начните вводить"
-            className="flex-1 bg-transparent text-[15px] text-[#1A2E2B] placeholder:text-[#B0B7B5] focus:outline-none"
-          />
-          <button
-            type="submit"
-            disabled={
-              !inputValue.trim() ||
-              isSendingMessage ||
-              isUploadingStatement ||
-              isGeneratingSchedule ||
-              pendingStatementText !== null
-            }
-            aria-label="Отправить"
-            className={`w-[44px] h-[44px] rounded-full flex items-center justify-center shrink-0 transition-all ${
-              inputValue.trim().length > 0 &&
-              !isSendingMessage &&
-              !isUploadingStatement &&
-              !isGeneratingSchedule
-                ? 'bg-[#A8C7C7] hover:bg-[#99BABA] active:scale-95 text-[#1A2E2B] opacity-100 cursor-pointer'
-                : 'bg-[#A8C7C7]/55 text-[#1A2E2B]/45 opacity-60 cursor-default'
-            }`}
-          >
-            <BowlOfHygieiaIcon className="w-[21px] h-[21px]" />
-          </button>
-        </motion.form>
+        <ChatInput
+          resetKey={inputResetKey}
+          onHasInputChange={setHasInput}
+          onSendMessage={(message) => void handleSendMessage(message)}
+          disabled={
+            isSendingMessage ||
+            isUploadingStatement ||
+            isGeneratingSchedule ||
+            pendingStatementText !== null
+          }
+        />
       </main>
     </div>
   );
