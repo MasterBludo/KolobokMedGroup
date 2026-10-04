@@ -208,6 +208,8 @@ def evaluate_recovery(state: dict, protocol: dict) -> TriageStatus:
 * `requirements.txt` — список Python-зависимостей.
 * `.env.example` — шаблон переменных окружения.
 
+Кнопка **Upload Statement** принимает PDF или изображение выписки и заполняет поле рекомендаций текстом, распознанным существующим OCR-модулем `ocrtest.py`.
+
 ### Быстрый старт (Python)
 
 1. Установите зависимости:
@@ -224,3 +226,24 @@ def evaluate_recovery(state: dict, protocol: dict) -> TriageStatus:
    ```bash
    streamlit run app.py
    ```
+
+## 5. Веб-интерфейс Recovery
+
+React-интерфейс из `UI/` запускается вместе с Express API и Vite из корня проекта:
+
+1. Установите зависимости Node.js: `npm install`.
+2. Установите Python 3 и зависимости OCR:
+   - Windows: `py -3 -m pip install -r requirements.txt`
+   - macOS/Linux: `python3 -m pip install -r requirements.txt`
+3. Укажите учётные данные GigaChat в `.env` (см. `.env.example`).
+4. Запустите `npm run dev` и откройте `http://localhost:3000`.
+
+Чат, распознавание PDF и изображений и формирование задач используют API `/api/chat`,
+`/api/ocr` и `/api/generate-schedule`. Для OCR также требуется Python и зависимости
+из `requirements.txt`. Сервер автоматически использует `python`, Windows Launcher
+`py -3` или `python3` в зависимости от операционной системы. Если Python установлен
+в виртуальном окружении или нестандартном каталоге, укажите его путь в `.env`:
+
+```env
+PYTHON_EXECUTABLE=C:\path\to\python.exe
+```
