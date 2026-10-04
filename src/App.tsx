@@ -57,6 +57,8 @@ export default function App() {
 
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [processingStatement, setProcessingStatement] = useState(false);
+  const [statementError, setStatementError] = useState("");
 
   const [repoFiles, setRepoFiles] = useState<Record<string, string>>({});
   const [selectedFile, setSelectedFile] = useState<string>("app.py");
@@ -78,17 +80,29 @@ export default function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const content = String(ev.target?.result || "");
-      if (content.trim()) {
-        setRecommendationsText(content);
+    setStatementError("");
+    setProcessingStatement(true);
+    try {
+      const extension = file.name.split(".").pop()?.toLowerCase() || "";
+      const response = await fetch(`/api/ocr?extension=${encodeURIComponent(extension)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: file,
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Не удалось распознать документ.");
       }
-    };
-    reader.readAsText(file);
+      setRecommendationsText(data.text || "");
+    } catch (error) {
+      setStatementError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setProcessingStatement(false);
+      e.target.value = "";
+    }
   };
 
   // Формирование расписания ТОЛЬКО ОДИН РАЗ при прикреплении списка рекомендаций
@@ -312,17 +326,18 @@ export default function App() {
             {!scheduleGenerated ? (
               <div className="space-y-3">
                 <div className="p-3 rounded-lg bg-slate-100 text-xs text-slate-700">
-                  Прикрепите файл с рекомендациями врача (<code>.txt</code>) или проверьте текст выписки ниже. ИИ (<strong>{selectedModel}</strong>) один раз извлечёт правила, проверит JSON через валидатор и развернёт повторяющиеся курсы (например, на 2 месяца = 60 дней) по конкретным датам календаря.
+                  Загрузите выписку в формате PDF или изображения, затем проверьте распознанный текст ниже. ИИ (<strong>{selectedModel}</strong>) один раз извлечёт правила, проверит JSON через валидатор и развернёт повторяющиеся курсы (например, на 2 месяца = 60 дней) по конкретным датам календаря.
                 </div>
 
                 <div>
                   <label className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium border border-slate-300 rounded-lg bg-white hover:bg-slate-50 cursor-pointer">
                     <Paperclip className="w-3.5 h-3.5" />
-                    <span>Прикрепить файл рекомендаций (.txt)</span>
+                    <span>Upload Statement</span>
                     <input
                       type="file"
-                      accept=".txt"
+                      accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp"
                       onChange={handleFileUpload}
+                      disabled={processingStatement}
                       className="hidden"
                     />
                   </label>
@@ -338,6 +353,11 @@ export default function App() {
                     rows={7}
                     className="w-full border border-slate-300 rounded-lg p-2.5 text-xs font-mono text-slate-800 focus:outline-none focus:border-slate-600"
                   />
+                  {(processingStatement || statementError) && (
+                    <p className={`mt-1 text-xs ${statementError ? "text-red-600" : "text-slate-500"}`}>
+                      {statementError || "Распознавание документа..."}
+                    </p>
+                  )}
                 </div>
 
                 <button

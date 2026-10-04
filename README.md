@@ -208,6 +208,8 @@ def evaluate_recovery(state: dict, protocol: dict) -> TriageStatus:
 * `requirements.txt` — список Python-зависимостей.
 * `.env.example` — шаблон переменных окружения.
 
+Кнопка **Upload Statement** принимает PDF или изображение выписки и заполняет поле рекомендаций текстом, распознанным существующим OCR-модулем `ocrtest.py`.
+
 ### Быстрый старт (Python)
 
 1. Установите зависимости:

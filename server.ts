@@ -2,8 +2,10 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
+import os from "os";
 import https from "https";
 import crypto from "crypto";
+import { spawn } from "child_process";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -324,6 +326,57 @@ async function startServer() {
       hasGigaChatKey: Boolean(resolveGigaChatCredentials()),
     });
   });
+
+  app.post(
+    "/api/ocr",
+    express.raw({ type: "application/octet-stream", limit: "20mb" }),
+    async (req, res) => {
+      const extension = String(req.query.extension || "").toLowerCase();
+      const allowedExtensions = new Set(["pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp"]);
+      if (!allowedExtensions.has(extension)) {
+        res.status(400).json({ error: "Выберите PDF-файл или изображение." });
+        return;
+      }
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        res.status(400).json({ error: "Загруженный файл пуст или не распознан." });
+        return;
+      }
+
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "kolobok-ocr-"));
+      const filePath = path.join(tempDir, `statement.${extension}`);
+      try {
+        fs.writeFileSync(filePath, req.body);
+        const scriptPath = path.join(process.cwd(), "ocrtest.py");
+        const text = await new Promise<string>((resolve, reject) => {
+          const python = spawn(
+            process.env.PYTHON_EXECUTABLE || "python",
+            [scriptPath, "--text-only", filePath],
+            { windowsHide: true }
+          );
+          let output = "";
+          let errorOutput = "";
+          python.stdout.setEncoding("utf8");
+          python.stderr.setEncoding("utf8");
+          python.stdout.on("data", (chunk: string) => (output += chunk));
+          python.stderr.on("data", (chunk: string) => (errorOutput += chunk));
+          python.on("error", reject);
+          python.on("close", (code) => {
+            if (code === 0) {
+              resolve(output.trim());
+            } else {
+              reject(new Error(errorOutput.trim() || `OCR завершился с кодом ${code}`));
+            }
+          });
+        });
+        res.json({ text });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        res.status(500).json({ error: `Не удалось распознать документ: ${message}` });
+      } finally {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }
+  );
 
   app.post("/api/generate-schedule", async (req, res) => {
     const { recommendationsText, startDate, model } = req.body as {

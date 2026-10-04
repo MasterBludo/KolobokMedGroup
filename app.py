@@ -1,7 +1,9 @@
 import base64
+import hashlib
 import json
 import os
 import re
+import tempfile
 import uuid
 from datetime import date, datetime, timedelta
 from typing import List, Optional
@@ -10,6 +12,7 @@ import urllib3
 import streamlit as st
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError, field_validator
+from ocrtest import DocumentOcrEngine
 
 # Отключаем предупреждения о самоподписанном SSL-сертификате Минцифры
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -19,6 +22,25 @@ load_dotenv(override=True)
 
 OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
 CHAT_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+
+
+@st.cache_resource
+def get_ocr_engine():
+    return DocumentOcrEngine()
+
+
+@st.cache_data(show_spinner=False)
+def extract_statement_text(file_bytes: bytes, extension: str) -> str:
+    temp_file = tempfile.NamedTemporaryFile(suffix=f".{extension}", delete=False)
+    try:
+        temp_file.write(file_bytes)
+        temp_file.close()
+        return get_ocr_engine().process_file(temp_file.name)
+    finally:
+        if not temp_file.closed:
+            temp_file.close()
+        if os.path.exists(temp_file.name):
+            os.unlink(temp_file.name)
 
 
 # =====================================================================
@@ -284,6 +306,7 @@ def generate_schedule_once_from_recommendations(
 
 Твоя задача — извлечь ВСЕ рекомендации (приём лекарств, кальция, перевязки, снятие повязок/швов, плановый приём врача) в структурированный JSON.
 Чтобы расписание на длительный срок (например, курс кальция на 1–2 месяца = 30–60 дней) гарантированно повторилось в календаре на каждый нужный день, используй массив "rules":
+Если написано N раза в день — укажи N времени в массиве "times".
 
 Поля каждого элемента в "rules":
 - "title": краткое название (строка, например: "Кальций Д3 Никомед" или "Плановый приём травматолога").
@@ -453,9 +476,12 @@ with col_schedule:
     st.subheader("2. Календарное расписание (Daily Check-in)")
 
     if not st.session_state.schedule_generated:
-        st.info("Прикрепите файл с рекомендациями врача (.txt) или вставьте текст выписки. Расписание формируется ИИ один раз с валидацией JSON и разворачиванием курсов на весь срок (включая курсы на 1–2 месяца).")
+        st.info("Загрузите выписку в формате PDF или изображения, затем проверьте распознанный текст ниже. Расписание формируется ИИ один раз с валидацией JSON и разворачиванием курсов на весь срок (включая курсы на 1–2 месяца).")
 
-        uploaded_file = st.file_uploader("Прикрепить файл рекомендаций (.txt)", type=["txt"])
+        uploaded_file = st.file_uploader(
+            "Upload Statement",
+            type=["pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp"],
+        )
         default_sample = (
             "Выписка: Операция остеосинтеза лодыжки.\n"
             "Рекомендации:\n"
@@ -465,11 +491,35 @@ with col_schedule:
             "4. Снятие повязки и швов — через 10 дней.\n"
             "5. Плановый приём травматолога и контрольный рентген — через 14 дней."
         )
-        text_from_file = uploaded_file.read().decode("utf-8", errors="ignore") if uploaded_file else ""
+        if "recommendations_text_input" not in st.session_state:
+            st.session_state["recommendations_text_input"] = default_sample
+
+        if uploaded_file:
+            extension = uploaded_file.name.rsplit(".", 1)[-1].lower()
+            file_bytes = uploaded_file.getvalue()
+            file_digest = hashlib.sha256(file_bytes).hexdigest()
+            if file_digest != st.session_state.get("_statement_ocr_digest"):
+                st.session_state["_statement_ocr_digest"] = file_digest
+                try:
+                    with st.spinner("Распознавание документа..."):
+                        st.session_state["recommendations_text_input"] = extract_statement_text(
+                            file_bytes,
+                            extension,
+                        )
+                    st.session_state["_statement_ocr_error"] = ""
+                except Exception as error:
+                    st.session_state["_statement_ocr_error"] = str(error)
+
+            if st.session_state.get("_statement_ocr_error"):
+                st.error(f"Не удалось распознать документ: {st.session_state['_statement_ocr_error']}")
+        else:
+            st.session_state.pop("_statement_ocr_digest", None)
+            st.session_state.pop("_statement_ocr_error", None)
+
         rec_input = st.text_area(
             "Текст рекомендаций из выписки:",
-            value=text_from_file if text_from_file else default_sample,
             height=150,
+            key="recommendations_text_input",
         )
 
         if st.button("Прикрепить рекомендации и сформировать расписание"):
