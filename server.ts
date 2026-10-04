@@ -1,5 +1,4 @@
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
 import os from "os";
@@ -320,22 +319,6 @@ async function startServer() {
 
   app.use(express.json());
 
-  app.get("/api/files", (_req, res) => {
-    const fileNames = ["README.md", "app.py", "requirements.txt", ".env.example"];
-    const files: Record<string, string> = {};
-    for (const name of fileNames) {
-      try {
-        files[name] = fs.readFileSync(path.join(process.cwd(), name), "utf-8");
-      } catch {
-        files[name] = "";
-      }
-    }
-    res.json({
-      files,
-      hasGigaChatKey: Boolean(resolveGigaChatCredentials()),
-    });
-  });
-
   app.post(
     "/api/ocr",
     express.raw({ type: "application/octet-stream", limit: "20mb" }),
@@ -501,13 +484,7 @@ ${recommendationsText || ""}`;
     }
   });
 
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
+  if (process.env.NODE_ENV === "production") {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*all", (_req, res) => {

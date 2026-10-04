@@ -2,6 +2,14 @@ node_modules/
 build/
 dist/
 coverage/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.idea/
+.vscode/
 .DS_Store
+Thumbs.db
+Desktop.ini
 *.log
-!.env.example

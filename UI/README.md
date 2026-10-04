@@ -1,20 +1,23 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Recovery UI
 
-# Run and deploy your AI Studio app
+React + TypeScript frontend. Install dependencies with `npm ci` **from the
+repository root**; the root lockfile manages both npm workspaces.
 
-This contains everything you need to run your app locally.
+Start the API in a separate terminal **from the repository root**:
 
-View your app in AI Studio: https://ai.studio/apps/994f438a-0283-4077-af2e-a376e93d995a
+```bash
+npm run dev:backend
+```
 
-## Run Locally
+Start the frontend **from this `UI/` directory**:
 
-**Prerequisites:**  Node.js
+```bash
+npm run dev:frontend
+```
 
+Open http://localhost:5173. Vite proxies `/api` to http://localhost:3000.
+Server settings are read from the root `.env`; Gemini settings are not used.
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+From `UI/`, `npm run build` emits to `../dist`, `npm run typecheck` checks the
+frontend, and `npm run preview` previews the production build. Full setup and
+production startup are documented in the [root README](../README.md).

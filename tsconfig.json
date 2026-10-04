@@ -4,7 +4,9 @@
     "experimentalDecorators": true,
     "useDefineForClassFields": false,
     "module": "ESNext",
-    "types": ["vite/client"],
+    "types": [
+      "node"
+    ],
     "lib": [
       "ES2022",
       "DOM",
@@ -23,5 +25,10 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "include": [
+    "server.ts",
+    "python-runtime.ts",
+    "schedule-json.ts"
+  ]
 }

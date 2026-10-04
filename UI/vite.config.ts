@@ -11,8 +11,13 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    build: {
+      outDir: path.resolve(__dirname, "../dist"),
+      emptyOutDir: true,
+    },
     server: {
       port: 5173,
+      strictPort: true,
       proxy: {
         '/api': 'http://localhost:3000',
       },

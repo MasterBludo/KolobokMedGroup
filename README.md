@@ -197,53 +197,98 @@ def evaluate_recovery(state: dict, protocol: dict) -> TriageStatus:
 
 ---
 
-## 4. Первый коммит (Initial Commit — Базовый чат на Python + GigaChat)
+## 4. Текущая структура и запуск
 
-На первом этапе реализовано минимальное диалоговое окно чата с пациентом на базе **Python (Streamlit)** и **GigaChat SDK**.
+Рабочий интерфейс: React + TypeScript в `UI/`. API: Express в `server.ts`.
+GigaChat обслуживает чат и генерацию расписания; OCR выполняется в `ocrtest.py`
+через `python-runtime.ts`. Парсинг расписания находится в `schedule-json.ts`.
+Архитектурные разделы выше описывают проектное направление, а не полностью
+реализованную систему хранения, авторизации или триажа.
 
-### Структура файлов первого коммита
+Streamlit (`app.py`) и старый корневой React-интерфейс удалены. Streamlit доступен
+в истории Git, например в коммите `1e51bea`; переписывать историю не требуется.
 
-* `README.md` — документация и архитектура проекта.
-* `app.py` — минимальный фронтенд на Python (Streamlit) с диалоговым окном чата GigaChat.
-* `requirements.txt` — список Python-зависимостей.
-* `.env.example` — шаблон переменных окружения.
+### Установка (из корня репозитория)
 
-Кнопка **Upload Statement** принимает PDF или изображение выписки и заполняет поле рекомендаций текстом, распознанным существующим OCR-модулем `ocrtest.py`.
+Требуются Node.js с npm и Python 3. Node-зависимости обоих пакетов управляются
+npm workspaces и единым корневым `package-lock.json`:
 
-### Быстрый старт (Python)
-
-1. Установите зависимости:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. Создайте файл `.env` и укажите ключ авторизации GigaChat:
-   ```env
-   GIGACHAT_CREDENTIALS=ваш_ключ_авторизации_gigachat
-   ```
-
-3. Запустите приложение:
-   ```bash
-   streamlit run app.py
-   ```
-
-## 5. Веб-интерфейс Recovery
-
-React-интерфейс из `UI/` запускается вместе с Express API и Vite из корня проекта:
-
-1. Установите зависимости Node.js: `npm install`.
-2. Установите Python 3 и зависимости OCR:
-   - Windows: `py -3 -m pip install -r requirements.txt`
-   - macOS/Linux: `python3 -m pip install -r requirements.txt`
-3. Укажите учётные данные GigaChat в `.env` (см. `.env.example`).
-4. Запустите `npm run dev` и откройте `http://localhost:3000`.
-
-Чат, распознавание PDF и изображений и формирование задач используют API `/api/chat`,
-`/api/ocr` и `/api/generate-schedule`. Для OCR также требуется Python и зависимости
-из `requirements.txt`. Сервер автоматически использует `python`, Windows Launcher
-`py -3` или `python3` в зависимости от операционной системы. Если Python установлен
-в виртуальном окружении или нестандартном каталоге, укажите его путь в `.env`:
-
-```env
-PYTHON_EXECUTABLE=C:\path\to\python.exe
+```bash
+npm ci
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
+
+Windows (PowerShell), также из корня:
+
+```powershell
+npm ci
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Существующий `.env` сохранён и намеренно отслеживается Git. Не заменяйте его.
+Для нового окружения используйте корневой `.env.example` как шаблон настроек
+GigaChat. При использовании виртуального окружения задайте `PYTHON_EXECUTABLE`
+в корневом `.env` как абсолютный путь к `.venv/bin/python` (macOS/Linux) или
+`.venv\Scripts\python.exe` (Windows). Без этой настройки сервер ищет системный
+Python (`python3`/`python`, в Windows также `py -3`).
+
+При первом OCR модели загружаются из Hugging Face; нужен доступ к сети.
+Шаблон `UI/.env.example` оставлен как исторический файл: Gemini-настройки
+активному приложению не нужны. Все рабочие настройки сервера находятся в корне.
+
+### Разработка: два отдельных терминала
+
+Backend — команда выполняется **из корня репозитория**:
+
+```bash
+npm run dev:backend
+```
+
+Express слушает `http://localhost:3000`. Backend больше не запускает Vite.
+
+Frontend — команда выполняется **из каталога `UI/`**:
+
+```bash
+cd UI
+npm run dev:frontend
+```
+
+Откройте `http://localhost:5173`. Порт фиксирован: если он занят, Vite завершится
+с ошибкой. Запросы `/api` проксируются на `http://localhost:3000`.
+Совместной команды запуска нет.
+
+### Сборка и проверки (из корня репозитория)
+
+```bash
+npm run build
+npm run typecheck:backend
+npm run typecheck:frontend
+```
+
+Корневая конфигурация Vite собирает `UI/` в корневой `dist/`.
+Команда `npm run build` из `UI/` использует тот же каталог вывода.
+Для просмотра сборки из `UI/`: `npm run preview`; для API используйте backend.
+В production Express может раздавать корневой `dist/`:
+
+```bash
+NODE_ENV=production npm run start:backend
+```
+
+Команда выполняется из корня. В PowerShell: `$env:NODE_ENV="production"`, затем
+`npm run start:backend`. Production frontend и `/api` доступны на порту 3000.
+
+Используемые API: `POST /api/chat`, `POST /api/ocr?extension=pdf` (или допустимое
+изображение, бинарное тело с `Content-Type: application/octet-stream`) и
+`POST /api/generate-schedule`. Без настроенных учётных данных GigaChat сохранены
+демо-ответ чата и существующий демонстрационный график.
+
+### Исходные архивы
+
+Для архива исходников используйте `git archive` с правилами `.gitattributes`.
+Они исключают зависимости, сборки, Python-кэши, виртуальные окружения,
+настройки редакторов и метаданные ОС. `.gitignore` предотвращает их повторное
+добавление. Локальные зависимости и настройки редакторов остаются на диске.
+`.env` и `.env.example` включаются намеренно. Каталог `.git` не изменяется
+и не удаляется; `git archive` экспортирует исходники без служебной базы Git.
