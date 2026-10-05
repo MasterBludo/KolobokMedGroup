@@ -7,19 +7,13 @@ let client: pg.Client | undefined;
 try {
   client = new pg.Client(databaseConfig());
   await client.connect();
-  await client.query(
-    await readFile(
-      new URL(
-        "../db/migrations/002_confirmed_instructions.sql",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  );
-  console.log("Migration 002 applied (or already present).");
+  for (const name of ["002_confirmed_instructions", "003_patient_plan"]) {
+    await client.query(await readFile(new URL(`../db/migrations/${name}.sql`, import.meta.url), "utf8"));
+    console.log(`Migration ${name} applied (or already present).`);
+  }
 } catch (error) {
   console.error(
-    error instanceof Error && /configuration missing|PGPORT/.test(error.message)
+    error instanceof Error && /configuration missing|PGPORT|Migration conflict|must already be applied/.test(error.message)
       ? error.message
       : "Migration failed. Check local database configuration and the previously applied 001 migration.",
   );

@@ -410,9 +410,8 @@ export function createApp(processing: Processing = { recognize: recognizeDocumen
   app.use("/api", recoveryRouter(processing));
 
   app.post("/api/chat", authenticate, wrap(async (req, res) => {
-    const { messages, model, caseId } = req.body as {
+    const { messages, model } = req.body as {
       messages?: Array<{ role: string; content: string }>;
-      caseId?: string;
       model?: string;
     };
 
@@ -425,7 +424,7 @@ export function createApp(processing: Processing = { recognize: recognizeDocumen
     const credentials = resolveGigaChatCredentials();
     const scope = process.env.GIGACHAT_SCOPE || "GIGACHAT_API_PERS";
 
-    const recommendationsText = caseId ? await savedContext(caseId, res.locals.patient.id) : "";
+    const recommendationsText = await savedContext(res.locals.patient.id);
     if (!credentials) {
       res.json({
         reply:

@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { api, Patient, RecoveryCase, PlanSnapshot, PlanPreview, patientToday } from './api';
+import { api, Patient, PlanSnapshot, PlanPreview, patientToday } from './api';
 
 interface Message {
   id: string;
@@ -270,8 +270,6 @@ export default function App() {
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
   const [patient, setPatient] = useState<Patient | null>(null);
-  const [cases, setCases] = useState<RecoveryCase[]>([]);
-  const [caseId, setCaseId] = useState('');
   const [snapshot, setSnapshot] = useState<PlanSnapshot>({ plan:null, prescriptions:[], events:[] });
   const [draftId, setDraftId] = useState<string | null>(null);
   const [startDate, setStartDate] = useState('');
@@ -282,13 +280,12 @@ export default function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [restoringSession, setRestoringSession] = useState(true);
   const [savingEvents, setSavingEvents] = useState<string[]>([]);
-  const [caseBusy, setCaseBusy] = useState(false);
   const patientRef = useRef<string | null>(null);
-  const selectedCaseRef = useRef('');
 
   const clearPatientState = () => {
-    patientRef.current=null;selectedCaseRef.current='';setPatient(null);setIsAuthorized(false);setUserName('');setAvatarUrl(DEFAULT_AVATAR_URL);
-    setCases([]);setCaseId('');setTasks([]);setSnapshot({plan:null,prescriptions:[],events:[]});
+    patientRef.current=null;setPatient(null);setIsAuthorized(false);setUserName('');setAvatarUrl(DEFAULT_AVATAR_URL);
+    setTasks([]);setSnapshot({plan:null,prescriptions:[],events:[]});
+    setStartDate('');setSelectedOperation(null);setCalendarDate('');setSavingEvents([]);
     setDraftId(null);setPlanPreview(null);setCurrentScreen('main');setIsTasksOpen(false);setActiveAccountModal(null);
     setRecommendationsText('');setPendingStatementText(null);setPendingStatementMessageId(null);setAttachedFileName(null);
     setAuthPassword('');setAuthEmail('');setAuthName('');setHasInput(false);setInputResetKey(key=>key+1);
@@ -302,20 +299,15 @@ export default function App() {
   const applySnapshot = (value:PlanSnapshot) => {
     setSnapshot(value);
     setRecommendationsText(value.plan?.confirmed_instructions || '');
-  };
-  const loadCases = async (current:Patient) => {
-    const data=await api<{cases:RecoveryCase[]}>('/cases');
-    if (patientRef.current!==current.id) return;
-    setCases(data.cases);
-    const stored=localStorage.getItem(`recovery-case:${current.id}`);
-    const selected=data.cases.find(c=>c.id===stored) || data.cases[0];
-    setCaseId(selected?.id || '');
+    setStartDate(value.plan?.recovery_start_date || '');
+    setSelectedOperation(value.plan?.procedure_name || null);
   };
   const acceptPatient = async (current:Patient) => {
     patientRef.current=current.id;setPatient(current);setUserName(current.username);setIsAuthorized(true);
     setCalendarDate(patientToday(current.timezone));
     setTasks([]);setSnapshot({plan:null,prescriptions:[],events:[]});
-    await loadCases(current);
+    const value=await api<PlanSnapshot>('/plan');
+    if (patientRef.current===current.id) applySnapshot(value);
   };
   useEffect(() => {
     let live=true;
@@ -325,30 +317,8 @@ export default function App() {
     return ()=>{live=false;};
   },[]);
   useEffect(() => {
-    selectedCaseRef.current=caseId;
-    setDraftId(null);setPlanPreview(null);setPendingStatementText(null);setPendingStatementMessageId(null);
-    setHasInput(false);setInputResetKey(key=>key+1);setMessages([{id:'welcome',sender:'assistant',text:'Привет, чем я могу помочь с восстановлением?'}]);
-    setAttachedFileName(null);setRecommendationsText('');setSnapshot({plan:null,prescriptions:[],events:[]});setTasks([]);
-    const selected=cases.find(c=>c.id===caseId);
-    setSelectedOperation(selected?.procedure_name || null);setStartDate(selected?.recovery_start_date || '');
-    if (!caseId || !patient) return;
-    localStorage.setItem(`recovery-case:${patient.id}`,caseId);
-    let live=true;
-    api<PlanSnapshot>(`/cases/${caseId}/plan`).then(value=>{if(live)applySnapshot(value);}).catch(error=>{if(live)setPersistenceError(error.message);});
-    return ()=>{live=false;};
-  },[caseId,patient?.id]);
-  useEffect(() => {
     setTasks(snapshot.events.filter(e=>e.scheduled_date===calendarDate && ['pending','completed'].includes(e.status)).map(e=>({id:e.id,text:`${e.scheduled_time?.slice(0,5) || 'Без времени'} · ${e.title}`,completed:e.status==='completed'})));
   },[snapshot,calendarDate]);
-  const createCase = async () => {
-    if (!selectedOperation) {setPersistenceError('Выберите операцию для нового эпизода.');return;}
-    if (caseBusy) return;
-    setCaseBusy(true);setPersistenceError('');
-    try {
-      const data=await api<{recoveryCase:RecoveryCase}>('/cases',{method:'POST',body:JSON.stringify({procedureName:selectedOperation,startDate:null})});
-      setCases(prev=>[data.recoveryCase,...prev]);setCaseId(data.recoveryCase.id);
-    } catch(error) {setPersistenceError((error as Error).message);} finally {setCaseBusy(false);}
-  };
   const handleLogout = async () => {
     try {
       if (draftId && !await cancelDraft()) return;
@@ -358,13 +328,12 @@ export default function App() {
   };
   const handlePersistPlan = async () => {
     if (!planPreview || isGeneratingSchedule) return;
-    const savingCase=caseId, savingPatient=patientRef.current;
+    const savingPatient=patientRef.current;
     setIsGeneratingSchedule(true);setPersistenceError('');
     try {
       const value=await api<PlanSnapshot>('/plans/confirm',{method:'POST',body:JSON.stringify({draftId:planPreview.draftId,version:planPreview.version,decisions:conflictDecisions})});
-      if (patientRef.current!==savingPatient || selectedCaseRef.current!==savingCase) return;
+      if (patientRef.current!==savingPatient) return;
       applySnapshot(value);setPlanPreview(null);setPendingStatementText(null);setPendingStatementMessageId(null);setDraftId(null);
-      setCases(prev=>prev.map(c=>c.id===caseId ? {...c,recovery_start_date:planPreview.startDate}:c));setStartDate(planPreview.startDate);
       setMessages(prev=>[...prev,{id:`saved-${Date.now()}`,sender:'assistant',text:'План сохранён. Задачи и отметки выполнения доступны после перезагрузки.'}]);
     } catch(error) {setPersistenceError((error as Error).message);} finally {setIsGeneratingSchedule(false);}
   };
@@ -423,7 +392,6 @@ export default function App() {
             role: message.sender,
             content: message.text,
           })),
-          caseId: caseId || undefined,
         }),
       });
       const data: { reply?: string; error?: string } = await response.json();
@@ -527,9 +495,9 @@ export default function App() {
     } catch(error) {setPersistenceError((error as Error).message);} finally {setSavingEvents(prev=>prev.filter(value=>value!==id));}
   };
   const handleAddTaskSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();const text=newTaskText.trim();if(!text||!caseId)return;
+    e.preventDefault();const text=newTaskText.trim();if(!text||!patient)return;
     try {
-      applySnapshot(await api<PlanSnapshot>(`/cases/${caseId}/tasks`,{method:'POST',body:JSON.stringify({text,date:calendarDate})}));
+      applySnapshot(await api<PlanSnapshot>('/plan/tasks',{method:'POST',body:JSON.stringify({text,date:calendarDate})}));
       setNewTaskText('');setIsAddingTask(false);
     } catch(error) {setPersistenceError((error as Error).message);}
   };
@@ -539,9 +507,8 @@ export default function App() {
     e.target.value = '';
     if (!file || isUploadingStatement || isGeneratingSchedule) return;
     if (!isAuthorized) {setIsAuthModalOpen(true);return;}
-    if (!caseId) {setPersistenceError('Создайте или выберите эпизод восстановления перед загрузкой.');return;}
-    if (draftId) await cancelDraft();
-    const uploadCaseId=caseId;
+    if (draftId && !await cancelDraft()) return;
+    const uploadingPatient=patientRef.current;
 
     setAttachedFileName(file.name);
     setIsUploadingStatement(true);
@@ -549,7 +516,7 @@ export default function App() {
     try {
       const extension = file.name.split('.').pop()?.toLowerCase() || '';
       const ocrResponse = await fetch(
-        `/api/ocr?extension=${encodeURIComponent(extension)}&caseId=${encodeURIComponent(caseId)}`,
+        `/api/ocr?extension=${encodeURIComponent(extension)}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/octet-stream' },
@@ -597,7 +564,7 @@ export default function App() {
       if (!ocrResponse.ok) {
         throw new Error(ocrData.error || 'Не удалось распознать выписку.');
       }
-      if (selectedCaseRef.current!==uploadCaseId) return;
+      if (patientRef.current!==uploadingPatient) return;
       if (ocrData.existing && Array.isArray(ocrData.events) && Array.isArray(ocrData.prescriptions)) {
         applySnapshot(ocrData as PlanSnapshot);
         setMessages(prev=>[...prev,{id:`existing-${Date.now()}`,sender:'assistant',text:'Этот документ уже сохранён. Загружен существующий план с отметками выполнения.'}]);return;
@@ -645,9 +612,9 @@ export default function App() {
     if (!startDate) {setPersistenceError('Подтвердите дату начала курса.');return;}
     setIsGeneratingSchedule(true);setPersistenceError('');
     try {
-      const generationCase=caseId, generationPatient=patientRef.current;
+      const generationPatient=patientRef.current;
       const data=await api<PlanPreview>('/generate-schedule',{method:'POST',body:JSON.stringify({draftId,confirmedText:pendingStatementText,startDate})});
-      if (patientRef.current!==generationPatient || selectedCaseRef.current!==generationCase) return;
+      if (patientRef.current!==generationPatient) return;
       setPlanPreview(data);setConflictDecisions({});
     } catch(error) {setPersistenceError((error as Error).message);} finally {setIsGeneratingSchedule(false);}
   };
@@ -1132,16 +1099,6 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {isAuthorized && <div className="absolute top-[82px] left-1/2 -translate-x-1/2 z-30 flex flex-wrap justify-center items-center gap-2 max-w-[90vw] text-[12px]">
-        <select aria-label="Эпизод восстановления" value={caseId} onChange={e=>{const next=e.target.value;void cancelDraft().then(cancelled=>{if(cancelled)setCaseId(next);});}} disabled={isUploadingStatement || isGeneratingSchedule} className="max-w-[220px] bg-white border border-[#EBEBEB] rounded-full px-3 py-2">
-          <option value="">Выберите эпизод</option>{cases.map(c=><option key={c.id} value={c.id}>{c.procedure_name} · {c.recovery_start_date || 'Дата не подтверждена'}</option>)}
-        </select>
-        <select aria-label="Операция нового эпизода" value={selectedOperation || ''} onChange={e=>setSelectedOperation(e.target.value)} className="max-w-[190px] bg-white border border-[#EBEBEB] rounded-full px-3 py-2">
-          <option value="">Операция</option>{OPERATIONS_LIST.map(op=><option key={op} value={op}>{op}</option>)}
-        </select>
-        <button type="button" disabled={caseBusy || isUploadingStatement || isGeneratingSchedule} onClick={()=>void createCase()} className="bg-[#A8C7C7] rounded-full px-3 py-2">Создать эпизод</button>
-      </div>}
-
       {/* TOP HEADER (Static, never scrolls) */}
       <header className="shrink-0 w-full px-10 md:px-14 pt-8 pb-4 grid grid-cols-3 items-center relative z-40">
         {/* Left Zone:
@@ -1261,7 +1218,7 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => setIsAddingTask(true)}
-                          disabled={!caseId}
+                          disabled={!patient}
                           aria-label="Add task"
                           className="absolute bottom-5 right-5 w-[50px] h-[50px] rounded-full bg-white border border-[#E6ECEB] shadow-[0_4px_14px_rgba(26,46,43,0.06)] flex items-center justify-center text-[#1A2E2B] hover:bg-[#A8C7C7]/25 hover:scale-105 active:scale-95 transition-all cursor-pointer"
                         >
@@ -1472,7 +1429,7 @@ export default function App() {
                         {msg.id === pendingStatementMessageId && pendingStatementText && (
                           <div className="flex flex-col gap-2 mt-4">
                             <textarea aria-label="Подтверждённые рекомендации" value={pendingStatementText} onChange={e=>{setPendingStatementText(e.target.value);setPlanPreview(null);}} disabled={isGeneratingSchedule} className="w-full min-h-[120px] rounded-xl border border-[#EBEBEB] p-3 text-[13px]" />
-                            <label className="text-[13px]">Дата начала курса <input type="date" value={startDate} onChange={e=>{setStartDate(e.target.value);setPlanPreview(null);}} disabled={!!cases.find(c=>c.id===caseId)?.recovery_start_date || isGeneratingSchedule} className="rounded-xl border border-[#EBEBEB] p-2" /></label>
+                            <label className="text-[13px]">Дата начала курса <input type="date" value={startDate} onChange={e=>{setStartDate(e.target.value);setPlanPreview(null);}} disabled={!!snapshot.plan?.recovery_start_date || isGeneratingSchedule} className="rounded-xl border border-[#EBEBEB] p-2" /></label>
                             {planPreview && <div className="max-h-[280px] overflow-auto text-[13px] space-y-3">
                               {planPreview.changes.map(change=><div key={change.key} className="border border-[#EBEBEB] rounded-xl p-3">
                                 <strong>{change.title}</strong><p>{change.instruction}</p>

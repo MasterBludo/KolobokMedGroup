@@ -16,7 +16,6 @@ import {
 interface Draft {
   id: string;
   patientId: string;
-  caseId: string;
   uploadId: string;
   attempt: number;
   text: string;
@@ -48,28 +47,18 @@ function uuid(value: unknown): string {
     throw new ApiError(400, "Неверный идентификатор.");
   return value;
 }
-async function ownedCase(
-  caseId: string,
-  patientId: string,
-  client: { query: Function } = database(),
-  lock = false,
-) {
-  const { rows } = await client.query(
-    `SELECT * FROM recovery_cases WHERE id=$1 AND patient_id=$2${lock ? " FOR UPDATE" : ""}`,
-    [uuid(caseId), patientId],
-  );
-  if (!rows[0]) throw new ApiError(404, "Эпизод восстановления не найден.");
-  return rows[0];
+// Lock the patient even when no plan exists, serializing first uploads/tasks.
+async function lockPatient(patientId: string, client: PoolClient) {
+  const { rows } = await client.query("SELECT id FROM patients WHERE id=$1 FOR UPDATE", [patientId]);
+  if (!rows[0]) throw new ApiError(404, "Пациент не найден.");
 }
 export async function readPlan(
-  caseId: string,
   patientId: string,
   client: { query: Function } = database(),
 ) {
-  await ownedCase(caseId, patientId, client);
   const { rows } = await client.query(
-    "SELECT * FROM plans WHERE recovery_case_id=$1",
-    [caseId],
+    "SELECT * FROM plans WHERE patient_id=$1",
+    [patientId],
   );
   if (!rows[0]) return { plan: null, prescriptions: [], events: [] };
   const plan = rows[0];
@@ -88,16 +77,15 @@ export async function readPlan(
   ).rows;
   return { plan, prescriptions, events };
 }
-export async function savedContext(caseId: string, patientId: string) {
-  const recoveryCase = await ownedCase(caseId, patientId);
-  const snapshot = await readPlan(caseId, patientId);
+export async function savedContext(patientId: string) {
+  const snapshot = await readPlan(patientId);
   const active = snapshot.prescriptions
     .filter((p: any) => p.status === "active")
     .map((p: any) => `${p.title}: ${p.instruction}`)
     .join("\n\n");
   return [
-    recoveryCase.procedure_name
-      ? `Операция: ${recoveryCase.procedure_name}`
+    snapshot.plan?.procedure_name
+      ? `Операция: ${snapshot.plan?.procedure_name}`
       : "",
     active ? `Действующие подтверждённые назначения:\n${active}` : "",
     snapshot.plan?.confirmed_instructions
@@ -183,7 +171,7 @@ export async function commitDraft(
   expectedVersion: number,
   decisions: Record<string, string>,
 ) {
-  if (draft.saved) return readPlan(draft.caseId, draft.patientId);
+  if (draft.saved) return readPlan(draft.patientId);
   if (
     !draft.instructions ||
     !draft.confirmedText ||
@@ -195,19 +183,14 @@ export async function commitDraft(
       "Сначала подтвердите текст и проверьте расписание.",
     );
   return transaction(async (client) => {
-    const recoveryCase = await ownedCase(
-      draft.caseId,
-      draft.patientId,
-      client,
-      true,
-    );
+    await lockPatient(draft.patientId, client);
     const { rows: uploads } = await client.query(
-      "SELECT * FROM upload_records WHERE id=$1 FOR UPDATE",
-      [draft.uploadId],
+      "SELECT * FROM upload_records WHERE id=$1 AND patient_id=$2 FOR UPDATE",
+      [draft.uploadId, draft.patientId],
     );
     const upload = uploads[0];
     if (upload?.status === "completed")
-      return readPlan(draft.caseId, draft.patientId, client);
+      return readPlan(draft.patientId, client);
     if (
       !upload ||
       upload.attempt_count !== draft.attempt ||
@@ -223,12 +206,12 @@ export async function commitDraft(
         "UPDATE upload_records SET status='processing',error_code=NULL,processed_at=NULL WHERE id=$1",
         [upload.id],
       );
+    const before = await readPlan(draft.patientId, client);
     if (
-      recoveryCase.recovery_start_date &&
-      recoveryCase.recovery_start_date !== draft.startDate
+      before.plan?.recovery_start_date &&
+      before.plan.recovery_start_date !== draft.startDate
     )
       throw new ApiError(409, "Дата начала курса уже подтверждена.");
-    const before = await readPlan(draft.caseId, draft.patientId, client);
     if ((before.plan?.version ?? 0) !== expectedVersion)
       throw new ApiError(409, "План изменился. Повторно проверьте расписание.");
     const changes = preview(draft.instructions!, before.prescriptions);
@@ -242,8 +225,8 @@ export async function commitDraft(
     if (!plan)
       plan = (
         await client.query(
-          `INSERT INTO plans(recovery_case_id) VALUES($1) RETURNING *`,
-          [draft.caseId],
+          `INSERT INTO plans(patient_id) VALUES($1) RETURNING *`,
+          [draft.patientId],
         )
       ).rows[0];
     let changed = !before.plan;
@@ -406,14 +389,14 @@ export async function commitDraft(
         [plan.id, full, draft.model, before.plan ? 1 : 0],
       );
     await client.query(
-      "UPDATE recovery_cases SET recovery_start_date=COALESCE(recovery_start_date,$2) WHERE id=$1",
-      [draft.caseId, draft.startDate],
+      "UPDATE plans SET recovery_start_date=COALESCE(recovery_start_date,$2) WHERE patient_id=$1",
+      [draft.patientId, draft.startDate],
     );
     await client.query(
       "UPDATE upload_records SET status='completed',error_code=NULL,processed_at=CURRENT_TIMESTAMP WHERE id=$1",
       [draft.uploadId],
     );
-    return readPlan(draft.caseId, draft.patientId, client);
+    return readPlan(draft.patientId, client);
   });
 }
 
@@ -432,49 +415,22 @@ export function recoveryRouter(processing: Processing) {
     }),
   );
   router.get(
-    "/cases",
+    "/plan",
     wrap(async (_req, res) => {
-      const { rows } = await database().query(
-        "SELECT * FROM recovery_cases WHERE patient_id=$1 ORDER BY created_at DESC,id",
-        [res.locals.patient.id],
-      );
-      res.json({ cases: rows, today: localToday(res.locals.patient.timezone) });
-    }),
-  );
-  router.post(
-    "/cases",
-    wrap(async (req, res) => {
-      const name = username(req.body.procedureName);
-      if (req.body.startDate != null && !validDate(req.body.startDate))
-        throw new ApiError(400, "Неверная дата начала.");
-      const { rows } = await database().query(
-        "INSERT INTO recovery_cases(patient_id,procedure_name,recovery_start_date) VALUES($1,$2,$3) RETURNING *",
-        [res.locals.patient.id, name, req.body.startDate || null],
-      );
-      res.status(201).json({ recoveryCase: rows[0] });
+      res.json(await readPlan(res.locals.patient.id));
     }),
   );
   router.get(
-    "/cases/:caseId/plan",
+    "/plan/events",
     wrap(async (req, res) => {
-      res.json(
-        await readPlan(String(req.params.caseId), res.locals.patient.id),
-      );
-    }),
-  );
-  router.get(
-    "/cases/:caseId/events",
-    wrap(async (req, res) => {
-      const caseId = String(req.params.caseId);
-      await ownedCase(caseId, res.locals.patient.id);
       const from = req.query.from || localToday(res.locals.patient.timezone),
         to = req.query.to || from;
       if (!validDate(from) || !validDate(to) || from > to)
         throw new ApiError(400, "Неверный диапазон дат.");
       const { rows } = await database().query(
         `SELECT e.*,p.title,p.instruction AS description FROM plan_events e JOIN prescriptions p ON p.id=e.prescription_id
-      JOIN plans pl ON pl.id=e.plan_id WHERE pl.recovery_case_id=$1 AND e.scheduled_date BETWEEN $2 AND $3 ORDER BY scheduled_date,scheduled_time NULLS LAST,occurrence_index`,
-        [caseId, from, to],
+      JOIN plans pl ON pl.id=e.plan_id WHERE pl.patient_id=$1 AND e.scheduled_date BETWEEN $2 AND $3 ORDER BY scheduled_date,scheduled_time NULLS LAST,occurrence_index`,
+        [res.locals.patient.id, from, to],
       );
       res.json({ events: rows });
     }),
@@ -487,7 +443,7 @@ export function recoveryRouter(processing: Processing) {
       const { rows } = await database().query(
         `UPDATE plan_events e SET status=CASE WHEN $3 THEN 'completed' ELSE 'pending' END,
       completed_at=CASE WHEN $3 THEN COALESCE(e.completed_at,CURRENT_TIMESTAMP) ELSE NULL END
-      FROM plans pl,recovery_cases c WHERE e.id=$1 AND e.plan_id=pl.id AND pl.recovery_case_id=c.id AND c.patient_id=$2
+      FROM plans pl WHERE e.id=$1 AND e.plan_id=pl.id AND pl.patient_id=$2
       AND e.status IN ('pending','completed') RETURNING e.*`,
         [uuid(req.params.eventId), res.locals.patient.id, req.body.completed],
       );
@@ -496,7 +452,7 @@ export function recoveryRouter(processing: Processing) {
     }),
   );
   router.post(
-    "/cases/:caseId/tasks",
+    "/plan/tasks",
     wrap(async (req, res) => {
       const date = req.body.date;
       if (
@@ -510,20 +466,19 @@ export function recoveryRouter(processing: Processing) {
         );
       const text = req.body.text.trim();
       if (!validDate(date)) throw new ApiError(400, "Укажите дату задачи.");
-      const caseId = String(req.params.caseId),
-        patientId = res.locals.patient.id;
+      const patientId = res.locals.patient.id;
       const result = await transaction(async (client) => {
-        await ownedCase(caseId, patientId, client, true);
+        await lockPatient(patientId, client);
         let plan = (
-          await client.query("SELECT * FROM plans WHERE recovery_case_id=$1", [
-            caseId,
+          await client.query("SELECT * FROM plans WHERE patient_id=$1", [
+            patientId,
           ])
         ).rows[0];
         if (!plan)
           plan = (
             await client.query(
-              "INSERT INTO plans(recovery_case_id,status,confirmed_at) VALUES($1,'confirmed',CURRENT_TIMESTAMP) RETURNING *",
-              [caseId],
+              "INSERT INTO plans(patient_id,status,confirmed_at) VALUES($1,'confirmed',CURRENT_TIMESTAMP) RETURNING *",
+              [patientId],
             )
           ).rows[0];
         const item = adaptReminders([
@@ -541,7 +496,7 @@ export function recoveryRouter(processing: Processing) {
         await client.query("UPDATE plans SET version=version+1 WHERE id=$1", [
           plan.id,
         ]);
-        return readPlan(caseId, patientId, client);
+        return readPlan(patientId, client);
       });
       res.json(result);
     }),
@@ -549,8 +504,7 @@ export function recoveryRouter(processing: Processing) {
   router.post(
     "/ocr",
     wrap(async (req, res) => {
-      const patientId = res.locals.patient.id,
-        caseId = uuid(req.query.caseId);
+      const patientId = res.locals.patient.id;
       const extension = String(req.query.extension || "").toLowerCase();
       if (
         !["pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp"].includes(extension)
@@ -560,10 +514,10 @@ export function recoveryRouter(processing: Processing) {
         throw new ApiError(400, "Загруженный файл пуст.");
       const hash = sha256(req.body);
       const claim = await transaction(async (client) => {
-        await ownedCase(caseId, patientId, client, true);
+        await lockPatient(patientId, client);
         const { rows } = await client.query(
-          "SELECT * FROM upload_records WHERE recovery_case_id=$1 AND file_sha256=$2 FOR UPDATE",
-          [caseId, hash],
+          "SELECT * FROM upload_records WHERE patient_id=$1 AND file_sha256=$2 FOR UPDATE",
+          [patientId, hash],
         );
         const old = rows[0];
         if (old?.status === "completed") return { existing: true };
@@ -584,20 +538,19 @@ export function recoveryRouter(processing: Processing) {
             ).rows[0]
           : (
               await client.query(
-                "INSERT INTO upload_records(recovery_case_id,file_sha256) VALUES($1,$2) RETURNING *",
-                [caseId, hash],
+                "INSERT INTO upload_records(patient_id,file_sha256) VALUES($1,$2) RETURNING *",
+                [patientId, hash],
               )
             ).rows[0];
         return { existing: false, upload };
       });
       if (claim.existing) {
-        res.json({ existing: true, ...(await readPlan(caseId, patientId)) });
+        res.json({ existing: true, ...(await readPlan(patientId)) });
         return;
       }
       const draft: Draft = {
         id: randomBytes(32).toString("hex"),
         patientId,
-        caseId,
         uploadId: claim.upload.id,
         attempt: claim.upload.attempt_count,
         text: "",
@@ -628,12 +581,12 @@ export function recoveryRouter(processing: Processing) {
     "/generate-schedule",
     wrap(async (req, res) => {
       const draft = getDraft(req.body.draftId, res.locals.patient.id);
-      const recoveryCase = await ownedCase(draft.caseId, draft.patientId);
-      const startDate = recoveryCase.recovery_start_date || req.body.startDate;
+      const snapshot = await readPlan(draft.patientId);
+      const startDate = snapshot.plan?.recovery_start_date || req.body.startDate;
       if (!validDate(startDate))
         throw new ApiError(400, "Подтвердите дату начала курса.");
       if (
-        recoveryCase.recovery_start_date &&
+        snapshot.plan?.recovery_start_date &&
         req.body.startDate &&
         req.body.startDate !== startDate
       )
@@ -646,7 +599,7 @@ export function recoveryRouter(processing: Processing) {
       draft.generating = true;
       try {
         await transaction(async (client) => {
-          await ownedCase(draft.caseId, draft.patientId, client, true);
+          await lockPatient(draft.patientId, client);
           const { rows } = await client.query(
             "SELECT * FROM upload_records WHERE id=$1 FOR UPDATE",
             [draft.uploadId],
@@ -673,8 +626,8 @@ export function recoveryRouter(processing: Processing) {
         ) {
           const result = await processing.generate(
             [
-              recoveryCase.procedure_name
-                ? `Операция: ${recoveryCase.procedure_name}`
+              snapshot.plan?.procedure_name
+                ? `Операция: ${snapshot.plan?.procedure_name}`
                 : "",
               text.trim(),
             ]
@@ -693,7 +646,7 @@ export function recoveryRouter(processing: Processing) {
           draft.confirmedText = text.trim();
           draft.startDate = startDate;
         }
-        const saved = await readPlan(draft.caseId, draft.patientId);
+        const saved = await readPlan(draft.patientId);
         res.json({
           draftId: draft.id,
           version: saved.plan?.version ?? 0,

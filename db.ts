@@ -57,9 +57,9 @@ export async function transaction<T>(
 export async function checkDatabase() {
   try {
     const { rows } = await database().query(
-      "SELECT version FROM schema_migrations WHERE version IN ('001_initial_schema', '002_confirmed_instructions')",
+      "SELECT version FROM schema_migrations WHERE version IN ('001_initial_schema', '002_confirmed_instructions', '003_patient_plan')",
     );
-    if (rows.length !== 2)
+    if (rows.length !== 3)
       throw new Error(
         "Apply the required numbered migrations before starting the backend.",
       );

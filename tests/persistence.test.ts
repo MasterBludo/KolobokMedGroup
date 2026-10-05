@@ -13,6 +13,7 @@ import { createApp, expandAndValidateSchedule } from "../server";
 import { adaptReminders, localToday } from "../plan-adapter";
 import { savedContext } from "../recovery";
 import { sha256 } from "../auth";
+import { verifyPatientPlanMigration } from "./patient-plan-migration";
 
 // Tests must target a disposable database, never recovery_dev.
 const testDatabase = process.env.TEST_PGDATABASE;
@@ -100,6 +101,7 @@ before(async () => {
   await pool.query(
     await readFile("db/migrations/002_confirmed_instructions.sql", "utf8"),
   );
+  await verifyPatientPlanMigration(pool);
   await checkDatabase();
   server = createApp(fake).listen(0, "127.0.0.1");
   await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -162,21 +164,10 @@ async function register(contact: { email?: string; phone?: string }) {
     201,
   );
 }
-async function createCase(cookie: string) {
+async function upload(cookie: string, bytes: string) {
   return (
     await request(
-      "/api/cases",
-      "POST",
-      { procedureName: "Fictional procedure", startDate: "2026-10-05" },
-      cookie,
-      201,
-    )
-  ).data.recoveryCase;
-}
-async function upload(caseId: string, cookie: string, bytes: string) {
-  return (
-    await request(
-      `/api/ocr?extension=pdf&caseId=${caseId}`,
+      "/api/ocr?extension=pdf",
       "POST",
       Buffer.from(bytes),
       cookie,
@@ -352,7 +343,7 @@ test("registration, normalized unique contacts, login, cookies, origins, expiry 
     ).rows[0].password_hash,
     /^\$argon2id\$/,
   );
-  const denied = await fetch(base + "/api/cases", {
+  const denied = await fetch(base + "/api/plan", {
     method: "POST",
     headers: {
       Origin: "https://untrusted.example",
@@ -371,7 +362,7 @@ test("registration, normalized unique contacts, login, cookies, origins, expiry 
       .patient,
     null,
   );
-  await request("/api/cases", "GET", undefined, login.cookie, 401);
+  await request("/api/plan", "GET", undefined, login.cookie, 401);
   await request("/api/auth/logout", "POST", undefined, a.cookie);
   assert.equal(
     (await request("/api/auth/me", "GET", undefined, a.cookie)).data.patient,
@@ -382,24 +373,24 @@ test("registration, normalized unique contacts, login, cookies, origins, expiry 
 test("confirmed whole plan, reload, ownership, completion, repeated and overlapping uploads", async () => {
   const a = await register({ email: "plan-a@example.test" }),
     b = await register({ email: "plan-b@example.test" });
-  const c = await createCase(a.cookie);
-  await request(`/api/cases/${c.id}/plan`, "GET", undefined, b.cookie, 404);
-  const draft = await upload(c.id, a.cookie, "file-one");
+  const c = a.data.patient;
+  assert.equal((await request("/api/plan", "GET", undefined, b.cookie)).data.plan, null);
+  const draft = await upload(a.cookie, "file-one");
   await request(
-    `/api/ocr?extension=pdf&caseId=${c.id}`,
+    "/api/ocr?extension=pdf",
     "POST",
     Buffer.from("file-one"),
     a.cookie,
     409,
   );
   assert.equal(
-    (await request(`/api/cases/${c.id}/plan`, "GET", undefined, a.cookie)).data
+    (await request("/api/plan", "GET", undefined, a.cookie)).data
       .events.length,
     0,
   );
   const generated = await preview(draft.draftId, a.cookie);
   assert.equal(
-    (await request(`/api/cases/${c.id}/plan`, "GET", undefined, a.cookie)).data
+    (await request("/api/plan", "GET", undefined, a.cookie)).data
       .events.length,
     0,
   );
@@ -425,17 +416,17 @@ test("confirmed whole plan, reload, ownership, completion, repeated and overlapp
     a.cookie,
   );
   const reload = (
-    await request(`/api/cases/${c.id}/plan`, "GET", undefined, a.cookie)
+    await request("/api/plan", "GET", undefined, a.cookie)
   ).data;
   assert.equal(reload.events[0].status, "completed");
   assert.ok(reload.events[0].completed_at);
-  const same = await upload(c.id, a.cookie, "file-one");
+  const same = await upload(a.cookie, "file-one");
   assert.equal(same.existing, true);
   assert.equal(same.events[0].id, event.id);
   assert.equal(same.events[0].status, "completed");
   const double = await confirm(generated, a.cookie);
   assert.equal(double.events.length, 2);
-  const photo = await upload(c.id, a.cookie, "different-photo");
+  const photo = await upload(a.cookie, "different-photo");
   const identical = await confirm(
     await preview(photo.draftId, a.cookie),
     a.cookie,
@@ -444,7 +435,7 @@ test("confirmed whole plan, reload, ownership, completion, repeated and overlapp
     identical.events.map((e: any) => e.id),
     reload.events.map((e: any) => e.id),
   );
-  const overlapping = await upload(c.id, a.cookie, "photo-overlap");
+  const overlapping = await upload(a.cookie, "photo-overlap");
   const expanded = await confirm(
     await preview(overlapping.draftId, a.cookie, "overlap"),
     a.cookie,
@@ -453,14 +444,14 @@ test("confirmed whole plan, reload, ownership, completion, repeated and overlapp
   assert.equal(expanded.prescriptions.length, 1);
   assert.equal(expanded.events[0].status, "completed");
   assert.equal(expanded.prescriptions[0].ends_on, "2026-10-07");
-  const disjoint = await upload(c.id, a.cookie, "disjoint-file");
+  const disjoint = await upload(a.cookie, "disjoint-file");
   const separate = await confirm(
     await preview(disjoint.draftId, a.cookie, "disjoint"),
     a.cookie,
   );
   assert.equal(separate.prescriptions.length, 2);
   assert.equal(separate.events.length, 5);
-  const bridge = await upload(c.id, a.cookie, "bridge-file");
+  const bridge = await upload(a.cookie, "bridge-file");
   const bridged = await confirm(
     await preview(bridge.draftId, a.cookie, "bridge"),
     a.cookie,
@@ -470,15 +461,9 @@ test("confirmed whole plan, reload, ownership, completion, repeated and overlapp
     bridged.events.map((e: any) => e.id),
     separate.events.map((e: any) => e.id),
   );
-  await request(
-    "/api/chat",
-    "POST",
-    { caseId: c.id, messages: [] },
-    b.cookie,
-    404,
-  );
+  assert.equal(await savedContext(b.data.patient.id), "");
   assert.match(
-    await savedContext(c.id, a.data.patient.id),
+    await savedContext(a.data.patient.id),
     /Полная инструкция/,
   );
   await request(
@@ -488,13 +473,13 @@ test("confirmed whole plan, reload, ownership, completion, repeated and overlapp
     a.cookie,
   );
   const cleared = (
-    await request(`/api/cases/${c.id}/plan`, "GET", undefined, a.cookie)
+    await request("/api/plan", "GET", undefined, a.cookie)
   ).data;
   assert.equal(cleared.events[0].completed_at, null);
   assert.equal(
     (
       await request(
-        `/api/cases/${c.id}/events?from=2026-10-05&to=2026-10-07`,
+        "/api/plan/events?from=2026-10-05&to=2026-10-07",
         "GET",
         undefined,
         a.cookie,
@@ -502,7 +487,7 @@ test("confirmed whole plan, reload, ownership, completion, repeated and overlapp
     ).data.events.length,
     3,
   );
-  await request(`/api/cases/${c.id}/events`, "GET", undefined, b.cookie, 404);
+  assert.deepEqual((await request("/api/plan/events", "GET", undefined, b.cookie)).data.events, []);
   await request(
     "/api/plans/confirm",
     "POST",
@@ -514,10 +499,10 @@ test("confirmed whole plan, reload, ownership, completion, repeated and overlapp
 
 test("conflicts require confirmation; replacement preserves completed history", async () => {
   const user = await register({ email: "conflict@example.test" }),
-    c = await createCase(user.cookie);
+    c = user.data.patient;
   const original = await confirm(
     await preview(
-      (await upload(c.id, user.cookie, "base")).draftId,
+      (await upload(user.cookie, "base")).draftId,
       user.cookie,
     ),
     user.cookie,
@@ -528,7 +513,7 @@ test("conflicts require confirmation; replacement preserves completed history", 
     { completed: true },
     user.cookie,
   );
-  const draft = await upload(c.id, user.cookie, "changed-file");
+  const draft = await upload(user.cookie, "changed-file");
   const generated = await preview(draft.draftId, user.cookie, "changed");
   assert.equal(generated.changes[0].conflicts.length, 1);
   await request(
@@ -539,7 +524,7 @@ test("conflicts require confirmation; replacement preserves completed history", 
     409,
   );
   assert.equal(
-    (await request(`/api/cases/${c.id}/plan`, "GET", undefined, user.cookie))
+    (await request("/api/plan", "GET", undefined, user.cookie))
       .data.prescriptions.length,
     1,
   );
@@ -559,16 +544,16 @@ test("conflicts require confirmation; replacement preserves completed history", 
 
 test("demo rejection, failed processing retries, concurrent saves, unknown times and rollback", async () => {
   const user = await register({ email: "retry@example.test" }),
-    c = await createCase(user.cookie);
+    c = user.data.patient;
   await request(
-    `/api/ocr?extension=pdf&caseId=${c.id}`,
+    "/api/ocr?extension=pdf",
     "POST",
     Buffer.from("ocr-fail"),
     user.cookie,
     500,
   );
   await request(
-    `/api/ocr?extension=pdf&caseId=${c.id}`,
+    "/api/ocr?extension=pdf",
     "POST",
     Buffer.from("ocr-fail"),
     user.cookie,
@@ -577,13 +562,13 @@ test("demo rejection, failed processing retries, concurrent saves, unknown times
   assert.equal(
     (
       await pool.query(
-        "SELECT attempt_count,status FROM upload_records WHERE recovery_case_id=$1 AND file_sha256=$2",
+        "SELECT attempt_count,status FROM upload_records WHERE patient_id=$1 AND file_sha256=$2",
         [c.id, sha256("ocr-fail")],
       )
     ).rows[0].attempt_count,
     2,
   );
-  const draft = await upload(c.id, user.cookie, "demo-file");
+  const draft = await upload(user.cookie, "demo-file");
   await request(
     "/api/generate-schedule",
     "POST",
@@ -592,7 +577,7 @@ test("demo rejection, failed processing retries, concurrent saves, unknown times
     503,
   );
   assert.equal(
-    (await request(`/api/cases/${c.id}/plan`, "GET", undefined, user.cookie))
+    (await request("/api/plan", "GET", undefined, user.cookie))
       .data.plan,
     null,
   );
@@ -614,7 +599,7 @@ test("demo rejection, failed processing retries, concurrent saves, unknown times
   assert.equal(
     (
       await pool.query(
-        "SELECT count(*)::int AS n FROM prescriptions p JOIN plans pl ON pl.id=p.plan_id WHERE pl.recovery_case_id=$1",
+        "SELECT count(*)::int AS n FROM prescriptions p JOIN plans pl ON pl.id=p.plan_id WHERE pl.patient_id=$1",
         [c.id],
       )
     ).rows[0].n,
@@ -623,7 +608,7 @@ test("demo rejection, failed processing retries, concurrent saves, unknown times
   assert.equal(
     (
       await pool.query(
-        "SELECT status FROM upload_records WHERE id=(SELECT id FROM upload_records WHERE recovery_case_id=$1 AND file_sha256=$2)",
+        "SELECT status FROM upload_records WHERE id=(SELECT id FROM upload_records WHERE patient_id=$1 AND file_sha256=$2)",
         [c.id, sha256("demo-file")],
       )
     ).rows[0].status,
@@ -641,7 +626,7 @@ test("demo rejection, failed processing retries, concurrent saves, unknown times
     [1, 2],
   );
   assert.equal(results[0].events[0].scheduled_time, null);
-  const other = await upload(c.id, user.cookie, "unknown-times-other");
+  const other = await upload(user.cookie, "unknown-times-other");
   const repeat = await confirm(
     await preview(other.draftId, user.cookie, "unknown-times"),
     user.cookie,
@@ -700,21 +685,8 @@ test(
       await page
         .getByRole("button", { name: "Аккаунт", exact: true })
         .waitFor();
-      await page
-        .getByLabel("Операция нового эпизода")
-        .selectOption({ label: "Остеосинтез при переломе" });
-      await page
-        .getByRole("button", { name: "Создать эпизод", exact: true })
-        .click();
-      await page.waitForFunction(() =>
-        Boolean(
-          (
-            document.querySelector(
-              '[aria-label="Эпизод восстановления"]',
-            ) as HTMLSelectElement
-          )?.value,
-        ),
-      );
+      assert.equal(await page.getByLabel("Эпизод восстановления").count(), 0);
+      assert.equal(await page.getByRole("button", { name: "Создать эпизод", exact: true }).count(), 0);
       await page
         .locator('input[type=file][accept^=".pdf"]')
         .setInputFiles({
@@ -752,14 +724,17 @@ test(
         .getByRole("button", { name: "09:00 · Упражнение", exact: true })
         .click();
       await page.waitForFunction(async () => {
-        const id = (
-          document.querySelector(
-            '[aria-label="Эпизод восстановления"]',
-          ) as HTMLSelectElement
-        ).value;
-        const data = await (await fetch(`/api/cases/${id}/plan`)).json();
+        const data = await (await fetch("/api/plan")).json();
         return data.events.some((e: any) => e.status === "completed");
       });
+      await page.mouse.move(900, 600);
+      await page.locator('input[type=file][accept^=".pdf"]').setInputFiles({
+        name: "fictional-copy.pdf", mimeType: "application/pdf", buffer: Buffer.from("browser-file"),
+      });
+      await page.getByText("Этот документ уже сохранён. Загружен существующий план с отметками выполнения.").waitFor();
+      const repeated = await page.evaluate(async () => (await fetch("/api/plan")).json());
+      assert.equal(repeated.events.length, 2);
+      assert.equal(repeated.events.filter((e: any) => e.status === "completed").length, 1);
       await page.reload();
       await page
         .getByRole("button", { name: "Аккаунт", exact: true })
@@ -774,12 +749,7 @@ test(
       assert.equal(await button.locator("svg").count(), 1);
       await button.click();
       await page.waitForFunction(async () => {
-        const id = (
-          document.querySelector(
-            '[aria-label="Эпизод восстановления"]',
-          ) as HTMLSelectElement
-        ).value;
-        const data = await (await fetch(`/api/cases/${id}/plan`)).json();
+        const data = await (await fetch("/api/plan")).json();
         return data.events.every(
           (e: any) => e.status === "pending" && e.completed_at === null,
         );
@@ -811,6 +781,13 @@ test(
       await page
         .getByRole("button", { name: "Авторизуйтесь", exact: true })
         .waitFor();
+      await page.getByRole("button", { name: "Авторизуйтесь", exact: true }).click();
+      await page.getByRole("button", { name: "Вход", exact: true }).click();
+      await page.getByPlaceholder("Телефон или эл. почта").fill("browser@example.test");
+      await page.getByPlaceholder("Пароль", { exact: true }).fill("Fictional-test-only-123!");
+      await page.getByRole("button", { name: "Войти в аккаунт", exact: true }).click();
+      await page.getByRole("button", { name: "Аккаунт", exact: true }).waitFor();
+      await page.waitForFunction(async () => (await (await fetch("/api/plan")).json()).events.length === 2);
       assert.deepEqual(pageErrors, []);
       await context.close();
     } finally {
@@ -829,11 +806,11 @@ test(
     base = `http://127.0.0.1:${(live.address() as AddressInfo).port}`;
     try {
       const user = await register({ email: "live-pipeline@example.test" }),
-        c = await createCase(user.cookie);
+        c = user.data.patient;
       const pdf = await readFile(process.env.TEST_DOCUMENT_PATH!);
       const draft = (
         await request(
-          `/api/ocr?extension=pdf&caseId=${c.id}`,
+          "/api/ocr?extension=pdf",
           "POST",
           pdf,
           user.cookie,
@@ -845,7 +822,7 @@ test(
       assert.ok(persisted.events.length >= 2);
       const repeated = (
         await request(
-          `/api/ocr?extension=pdf&caseId=${c.id}`,
+          "/api/ocr?extension=pdf",
           "POST",
           pdf,
           user.cookie,
@@ -860,7 +837,6 @@ test(
         "/api/chat",
         "POST",
         {
-          caseId: c.id,
           messages: [
             {
               role: "user",
@@ -880,16 +856,8 @@ test(
 
 test("stable confirmed start dates, failed generation retry, draft cancellation and stale previews", async () => {
   const user = await register({ email: "stable-start@example.test" });
-  const c = (
-    await request(
-      "/api/cases",
-      "POST",
-      { procedureName: "Separate episode" },
-      user.cookie,
-      201,
-    )
-  ).data.recoveryCase;
-  const draft = await upload(c.id, user.cookie, "relative-instructions");
+  const c = user.data.patient;
+  const draft = await upload(user.cookie, "relative-instructions");
   await request(
     "/api/generate-schedule",
     "POST",
@@ -911,7 +879,7 @@ test("stable confirmed start dates, failed generation retry, draft cancellation 
   assert.equal(
     (
       await pool.query(
-        "SELECT status FROM upload_records WHERE recovery_case_id=$1",
+        "SELECT status FROM upload_records WHERE patient_id=$1",
         [c.id],
       )
     ).rows[0].status,
@@ -919,7 +887,7 @@ test("stable confirmed start dates, failed generation retry, draft cancellation 
   );
   const generated = await preview(draft.draftId, user.cookie);
   await confirm(generated, user.cookie);
-  const subsequent = await upload(c.id, user.cookie, "second-upload");
+  const subsequent = await upload(user.cookie, "second-upload");
   await request(
     "/api/generate-schedule",
     "POST",
@@ -933,7 +901,7 @@ test("stable confirmed start dates, failed generation retry, draft cancellation 
   );
   const previewed = await preview(subsequent.draftId, user.cookie, "overlap");
   await request(
-    `/api/cases/${c.id}/tasks`,
+    "/api/plan/tasks",
     "POST",
     { text: "Fictional personal task", date: "2026-10-05" },
     user.cookie,
@@ -950,35 +918,35 @@ test("stable confirmed start dates, failed generation retry, draft cancellation 
   assert.equal(
     (
       await pool.query(
-        "SELECT recovery_start_date FROM recovery_cases WHERE id=$1",
+        "SELECT recovery_start_date FROM plans WHERE patient_id=$1",
         [c.id],
       )
     ).rows[0].recovery_start_date,
     "2026-10-05",
   );
-  const cancel = await upload(c.id, user.cookie, "cancelled-file");
+  const cancel = await upload(user.cookie, "cancelled-file");
   await request(
     `/api/drafts/${cancel.draftId}`,
     "DELETE",
     undefined,
     user.cookie,
   );
-  const retry = await upload(c.id, user.cookie, "cancelled-file");
+  const retry = await upload(user.cookie, "cancelled-file");
   assert.ok(retry.draftId);
   assert.notEqual(retry.draftId, cancel.draftId);
 });
 
 test("keeping a conflict preserves the complete confirmed document and old event IDs", async () => {
   const user = await register({ email: "keep-conflict@example.test" }),
-    c = await createCase(user.cookie);
+    c = user.data.patient;
   const original = await confirm(
     await preview(
-      (await upload(c.id, user.cookie, "keep-original")).draftId,
+      (await upload(user.cookie, "keep-original")).draftId,
       user.cookie,
     ),
     user.cookie,
   );
-  const draft = await upload(c.id, user.cookie, "keep-changed");
+  const draft = await upload(user.cookie, "keep-changed");
   const complete =
     "changed: non-calendar instruction must remain in the confirmed document.";
   const generated = await preview(draft.draftId, user.cookie, complete);
@@ -991,4 +959,33 @@ test("keeping a conflict preserves the complete confirmed document and old event
   );
   assert.match(saved.plan.confirmed_instructions, /non-calendar instruction/);
   assert.match(saved.plan.confirmed_instructions, /не применяется/);
+});
+
+
+test("patient ownership, independent file deduplication and concurrent first tasks", async () => {
+  const a = await register({ email: "direct-plan-a@example.test" });
+  const b = await register({ email: "direct-plan-b@example.test" });
+  assert.equal((await request("/api/plan", "GET", undefined, a.cookie)).data.plan, null);
+  await Promise.all([
+    request("/api/plan/tasks", "POST", { text: "First personal task", date: "2024-04-01", patient_id: b.data.patient.id }, a.cookie),
+    request("/api/plan/tasks", "POST", { text: "Second personal task", date: "2024-04-02" }, a.cookie),
+  ]);
+  const tasks = (await request("/api/plan", "GET", undefined, a.cookie)).data;
+  assert.equal(tasks.plan.patient_id, a.data.patient.id);
+  assert.equal(tasks.plan.recovery_start_date, null, "task date must not become the confirmed course start");
+  assert.equal(tasks.events.length, 2);
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM plans WHERE patient_id=$1", [a.data.patient.id])).rows[0].n, 1);
+  assert.equal((await request("/api/plan", "GET", undefined, b.cookie)).data.plan, null);
+  const first = await upload(a.cookie, "shared-file-bytes");
+  const second = await upload(b.cookie, "shared-file-bytes");
+  assert.notEqual(first.draftId, second.draftId);
+  await request("/api/generate-schedule", "POST", { draftId: first.draftId, confirmedText: "confirmed", startDate: "2024-03-12" }, b.cookie, 410);
+  const generated = (await request("/api/generate-schedule", "POST", { draftId: first.draftId, confirmedText: "confirmed", startDate: "2024-03-12" }, a.cookie)).data;
+  const saved = await confirm(generated, a.cookie);
+  assert.equal(saved.plan.id, tasks.plan.id);
+  assert.equal(saved.plan.recovery_start_date, "2024-03-12");
+  assert.equal((await upload(a.cookie, "shared-file-bytes")).existing, true);
+  const secondSaved = await confirm(await preview(second.draftId, b.cookie), b.cookie);
+  assert.notEqual(secondSaved.plan.id, saved.plan.id);
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM upload_records WHERE file_sha256=$1", [sha256("shared-file-bytes")])).rows[0].n, 2);
 });

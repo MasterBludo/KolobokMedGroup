@@ -5,11 +5,6 @@ export interface Patient {
   phone: string | null;
   timezone: string;
 }
-export interface RecoveryCase {
-  id: string;
-  procedure_name: string | null;
-  recovery_start_date: string | null;
-}
 export interface PlanEvent {
   id: string;
   scheduled_date: string;
@@ -23,6 +18,9 @@ export interface PlanSnapshot {
   plan: {
     id: string;
     version: number;
+    patient_id: string;
+    recovery_start_date: string | null;
+    procedure_name: string | null;
     confirmed_instructions: string | null;
   } | null;
   prescriptions: {
