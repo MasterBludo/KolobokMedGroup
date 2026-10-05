@@ -56,23 +56,46 @@ export interface PlanPreview {
     }[];
   }[];
 }
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`/api${path}`, {
-    ...init,
-    credentials: "same-origin",
-    headers: {
-      ...(init.body && typeof init.body === "string"
-        ? { "Content-Type": "application/json" }
-        : {}),
-      ...init.headers,
-    },
-  });
-  const body = await response.json();
-  if (response.status === 401 && path !== "/auth/login")
-    window.dispatchEvent(new Event("recovery-session-expired"));
-  if (!response.ok)
-    throw new Error(body.error || `Ошибка запроса (${response.status}).`);
-  return body as T;
+export async function api<T>(path: string, init: RequestInit = {}, timeoutMs = 30_000): Promise<T> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  let timedOut = false;
+  const timer = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  if (init.signal?.aborted) controller.abort();
+  init.signal?.addEventListener('abort', abort, { once: true });
+  try {
+    const response = await fetch(`/api${path}`, {
+      ...init,
+      signal: controller.signal,
+      credentials: "same-origin",
+      headers: {
+        ...(init.body && typeof init.body === "string"
+          ? { "Content-Type": "application/json" }
+          : {}),
+        ...init.headers,
+      },
+    });
+    if (response.status === 401 && !path.startsWith('/auth/'))
+      window.dispatchEvent(new Event("recovery-session-expired"));
+    const body = await response.json().catch(() => {
+      throw new Error('Сервер вернул некорректный ответ. Повторите попытку.');
+    });
+    if (!response.ok)
+      throw new Error(body.error || `Ошибка запроса (${response.status}).`);
+    return body as T;
+  } catch (error) {
+    if (timedOut)
+      throw new Error('Сервер не ответил вовремя. Повторите попытку.');
+    if (error instanceof TypeError)
+      throw new Error('Нет соединения с сервером. Повторите попытку.');
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+    init.signal?.removeEventListener('abort', abort);
+  }
 }
 export function patientToday(tz: string) {
   const parts = new Intl.DateTimeFormat("en-CA", {

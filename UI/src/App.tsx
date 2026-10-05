@@ -27,8 +27,8 @@ interface ReminderItem {
   title: string;
 }
 
-const DEFAULT_AVATAR_URL = '/src/assets/images/default_user_avatar_1791136890330.jpg';
-const TRAIL_RUNNER_BG_URL = '/src/assets/images/trail_runner_bg_1791136878819.jpg';
+const DEFAULT_AVATAR_URL = new URL('./assets/images/default_user_avatar_1791136890330.jpg', import.meta.url).href;
+const TRAIL_RUNNER_BG_URL = new URL('./assets/images/trail_runner_bg_1791136878819.jpg', import.meta.url).href;
 
 const OPERATIONS_LIST = [
   'Эндопротезирование тазобедренного сустава',
@@ -274,6 +274,8 @@ export default function App() {
   const [draftId, setDraftId] = useState<string | null>(null);
   const [startDate, setStartDate] = useState('');
   const [calendarDate, setCalendarDate] = useState('');
+  const [calendarMonth, setCalendarMonth] = useState('');
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const [planPreview, setPlanPreview] = useState<PlanPreview | null>(null);
   const [conflictDecisions, setConflictDecisions] = useState<Record<string,string>>({});
   const [persistenceError, setPersistenceError] = useState('');
@@ -281,8 +283,12 @@ export default function App() {
   const [restoringSession, setRestoringSession] = useState(true);
   const [savingEvents, setSavingEvents] = useState<string[]>([]);
   const patientRef = useRef<string | null>(null);
+  const sessionCheckRef = useRef<AbortController | null>(null);
+  const chatRequestRef = useRef<AbortController | null>(null);
 
   const clearPatientState = () => {
+    sessionCheckRef.current?.abort();chatRequestRef.current?.abort();
+    setRestoringSession(false);setIsSendingMessage(false);setIsUploadingStatement(false);setIsGeneratingSchedule(false);setIsOperationMenuOpen(false);setIsAddingTask(false);setNewTaskText('');
     patientRef.current=null;setPatient(null);setIsAuthorized(false);setUserName('');setAvatarUrl(DEFAULT_AVATAR_URL);
     setTasks([]);setSnapshot({plan:null,prescriptions:[],events:[]});
     setStartDate('');setSelectedOperation(null);setCalendarDate('');setSavingEvents([]);
@@ -305,16 +311,23 @@ export default function App() {
   const acceptPatient = async (current:Patient) => {
     patientRef.current=current.id;setPatient(current);setUserName(current.username);setIsAuthorized(true);
     setCalendarDate(patientToday(current.timezone));
+    setCalendarMonth(patientToday(current.timezone).slice(0, 7));
     setTasks([]);setSnapshot({plan:null,prescriptions:[],events:[]});
-    const value=await api<PlanSnapshot>('/plan');
-    if (patientRef.current===current.id) applySnapshot(value);
+    // Saved data loads separately so a slow plan request cannot block authentication.
+    void api<PlanSnapshot>('/plan').then(value => {
+      if (patientRef.current===current.id) applySnapshot(value);
+    }).catch(error => {if (patientRef.current===current.id) setPersistenceError(error.message);});
   };
   useEffect(() => {
     let live=true;
-    api<{patient:Patient|null}>('/auth/me').then(async data=>{
-      if (live && data.patient) await acceptPatient(data.patient);
-    }).catch(error=>{if(live)setPersistenceError(error.message);}).finally(()=>{if(live)setRestoringSession(false);});
-    return ()=>{live=false;};
+    const controller = new AbortController();
+    sessionCheckRef.current = controller;
+    api<{patient:Patient|null}>('/auth/me', {signal:controller.signal}, 8_000).then(async data=>{
+      if (live && !controller.signal.aborted && data.patient) await acceptPatient(data.patient);
+    }).catch(error=>{
+      if(live && !controller.signal.aborted)setPersistenceError(error.message);
+    }).finally(()=>{if(live)setRestoringSession(false);});
+    return ()=>{live=false;controller.abort();};
   },[]);
   useEffect(() => {
     setTasks(snapshot.events.filter(e=>e.scheduled_date===calendarDate && ['pending','completed'].includes(e.status)).map(e=>({id:e.id,text:`${e.scheduled_time?.slice(0,5) || 'Без времени'} · ${e.title}`,completed:e.status==='completed'})));
@@ -382,9 +395,12 @@ export default function App() {
     setMessages(nextMessages);
     setIsSendingMessage(true);
     const chatPatient=patientRef.current;
+    const controller = new AbortController();
+    chatRequestRef.current = controller;
 
     try {
-      const response = await fetch('/api/chat', {
+      const data = await api<{reply?:string}>('/chat', {
+        signal: controller.signal,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -393,16 +409,11 @@ export default function App() {
             content: message.text,
           })),
         }),
-      });
-      const data: { reply?: string; error?: string } = await response.json();
-      if (response.status===401) window.dispatchEvent(new Event('recovery-session-expired'));
-      if (!response.ok) {
-        throw new Error(data.error || 'Не удалось получить ответ от сервера.');
-      }
+      }, 90_000);
       if (!data.reply) {
         throw new Error('Сервер вернул пустой ответ.');
       }
-      if (patientRef.current!==chatPatient) return;
+      if (controller.signal.aborted || patientRef.current!==chatPatient) return;
       const reply = data.reply;
       setMessages((prev) => [
         ...prev,
@@ -415,7 +426,7 @@ export default function App() {
           : error instanceof Error
             ? error.message
             : 'Ошибка соединения с сервером.';
-      if (patientRef.current!==chatPatient) return;
+      if (controller.signal.aborted || patientRef.current!==chatPatient) return;
       setMessages((prev) => [
         ...prev,
         {
@@ -425,11 +436,12 @@ export default function App() {
         },
       ]);
     } finally {
-      setIsSendingMessage(false);
+      if (chatRequestRef.current === controller) {chatRequestRef.current=null;setIsSendingMessage(false);}
     }
   };
 
   const handleResetToStart = () => {
+    chatRequestRef.current?.abort();chatRequestRef.current=null;setIsSendingMessage(false);
     if (draftId) void cancelDraft();
     setCurrentScreen('main');
     setHasInput(false);
@@ -453,6 +465,8 @@ export default function App() {
       const contact=authEmail.trim();
       const body=authMode==='register' ? {username:authName,email:contact.includes('@') ? contact:undefined,phone:contact.includes('@') ? undefined:contact,password:authPassword,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone} : {contact,password:authPassword};
       const data=await api<{patient:Patient}>(`/auth/${authMode}`,{method:'POST',body:JSON.stringify(body)});
+      sessionCheckRef.current?.abort();setRestoringSession(false);
+      handleResetToStart();
       await acceptPatient(data.patient);setIsAuthModalOpen(false);setAuthEmail('');setAuthPassword('');setAuthName('');
     } catch(error) {setPersistenceError((error as Error).message);} finally {setAuthBusy(false);}
   };
@@ -521,6 +535,7 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/octet-stream' },
           body: file,
+          signal: AbortSignal.timeout(180_000),
         }
       );
       const responseBody = await ocrResponse.text();
@@ -613,7 +628,7 @@ export default function App() {
     setIsGeneratingSchedule(true);setPersistenceError('');
     try {
       const generationPatient=patientRef.current;
-      const data=await api<PlanPreview>('/generate-schedule',{method:'POST',body:JSON.stringify({draftId,confirmedText:pendingStatementText,startDate})});
+      const data=await api<PlanPreview>('/generate-schedule',{method:'POST',body:JSON.stringify({draftId,confirmedText:pendingStatementText,startDate})}, 180_000);
       if (patientRef.current!==generationPatient) return;
       setPlanPreview(data);setConflictDecisions({});
     } catch(error) {setPersistenceError((error as Error).message);} finally {setIsGeneratingSchedule(false);}
@@ -629,320 +644,120 @@ export default function App() {
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (settingsSaving) return;
+    setSettingsSaving(true);setPersistenceError('');
     try {
       const data=await api<{patient:Patient}>('/patient',{method:'PATCH',body:JSON.stringify({username:settingsNameInput})});
       setPatient(data.patient);setUserName(data.patient.username);setActiveAccountModal(null);
-    } catch(error) {setPersistenceError((error as Error).message);}
+    } catch(error) {setPersistenceError((error as Error).message);} finally {setSettingsSaving(false);}
   };
-  const statusNotice = (persistenceError || restoringSession) && <div role="status" className="fixed top-2 left-1/2 -translate-x-1/2 z-[70] max-w-[90vw] rounded-[18px] border border-[#EBEBEB] bg-white px-4 py-2 text-[13px] text-[#1A2E2B] shadow-sm" onClick={()=>setPersistenceError('')}>{restoringSession ? 'Проверяю сессию…':persistenceError}</div>;
+  const statusNotice = (persistenceError || restoringSession) && (
+    <div className="fixed top-2 left-1/2 -translate-x-1/2 z-[70] max-w-[90vw] pointer-events-none">
+      <div role="status" className="rounded-[18px] border border-[#EBEBEB] bg-white px-4 py-2 text-[13px] text-[#1A2E2B] shadow-sm flex items-center gap-3">
+        <span>{persistenceError || 'Проверяю сессию…'}</span>
+        {persistenceError && <button type="button" aria-label="Закрыть уведомление" className="pointer-events-auto cursor-pointer px-1" onClick={()=>setPersistenceError('')}>×</button>}
+      </div>
+    </div>
+  );
 
-  // SCREEN 6: Account View ("Аккаунт")
   if (currentScreen === 'account') {
+    const month = new Date(`${calendarMonth || calendarDate.slice(0, 7)}-01T12:00:00`);
+    const monthLabel = month.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+    const firstWeekday = (month.getDay() + 6) % 7;
+    const daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+    const shiftMonth = (offset: number) => {
+      const next = new Date(month.getFullYear(), month.getMonth() + offset, 1);
+      setCalendarMonth(`${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}`);
+    };
     return (
-      <div className="h-screen w-full bg-[#FAFAFA] text-[#1A2E2B] flex flex-col justify-between relative overflow-hidden">
+      <div className={`account-page ${activeAccountModal ? 'account-page-detail' : ''}`}>
         {statusNotice}
-        {/* Hidden file input for Avatar upload */}
-        <input
-          ref={avatarInputRef}
-          type="file"
-          accept="image/*"
-          onChange={handleAvatarChange}
-          className="hidden"
-        />
-
-        {/* Top Header:
-            - Left: Empty
-            - Center: "Аккаунт"
-            - Right (Top-Right Corner): "Назад" button as required
-        */}
-        <header className="shrink-0 w-full px-10 md:px-14 pt-8 pb-4 grid grid-cols-3 items-center relative z-30">
-          {/* Top-Left: Empty */}
-          <div />
-
-          {/* Top-Center: Title */}
-          <div className="flex items-center justify-center">
-            <h1 className="text-[18px] font-semibold tracking-tight text-[#1A2E2B]">
-              Аккаунт
-            </h1>
-          </div>
-
-          {/* Top-Right Corner: "Назад" button */}
-          <div className="flex items-center justify-end">
-            <button
-              type="button"
-              onClick={() => setCurrentScreen('main')}
-              className="inline-flex items-center gap-2 text-[15px] font-medium text-[#1A2E2B] hover:opacity-70 transition-opacity cursor-pointer"
-            >
-              <ArrowLeftCircleOutlineIcon className="w-[18px] h-[18px]" />
-              <span>Назад</span>
+        <input ref={avatarInputRef} type="file" accept="image/*" onChange={handleAvatarChange} className="hidden" aria-label="Загрузить фото профиля" />
+        {!activeAccountModal && (
+          <header className="account-topbar">
+            <button type="button" className="account-back" onClick={() => setCurrentScreen('main')}>
+              <ArrowLeftCircleOutlineIcon /><span>Назад</span>
             </button>
-          </div>
-        </header>
-
-        {/* Account Sub-Modals ("Настройки" & "План реабилитации") with blurred background */}
-        <AnimatePresence>
-          {activeAccountModal && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              onClick={() => setActiveAccountModal(null)}
-              className="fixed inset-0 bg-[#1A2E2B]/12 backdrop-blur-md z-50 flex items-center justify-center p-4"
-            >
-              <motion.div
-                initial={{ opacity: 0, scale: 0.96, y: 10 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.96, y: 10 }}
-                transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-                onClick={(e) => e.stopPropagation()}
-                className="w-full max-w-[400px] rounded-[36px] bg-gradient-to-br from-[#95B8B8] via-[#A8C7C7] to-[#BDD8D8] p-[2px] shadow-[0_24px_64px_rgba(26,46,43,0.18)]"
-              >
-                <div className="px-6 pt-5 pb-4 flex items-center justify-between">
-                  <div>
-                    <div className="text-[16px] font-semibold text-[#1A2E2B] leading-tight">
-                      {activeAccountModal === 'settings'
-                        ? 'Настройки профиля'
-                        : 'План реабилитации'}
-                    </div>
-                    <div className="text-[13px] font-normal text-[#1A2E2B]/70 leading-tight mt-0.5">
-                      {activeAccountModal === 'settings'
-                        ? 'Личные данные и аватар'
-                        : selectedOperation || 'Базовый протокол восстановления'}
+          </header>
+        )}
+        <main className={`account-card ${activeAccountModal ? 'account-detail-card' : 'account-profile-card'}`}>
+          {activeAccountModal ? (
+            <>
+              <header className="account-detail-header">
+                <button type="button" className="account-back" onClick={() => setActiveAccountModal(null)}>
+                  <ArrowLeftCircleOutlineIcon /><span>К профилю</span>
+                </button>
+                <h1>{activeAccountModal === 'settings' ? 'Настройки профиля' : 'План реабилитации'}</h1>
+              </header>
+              {activeAccountModal === 'settings' ? (
+                <form onSubmit={handleSaveSettings} className="account-settings-form">
+                  <div className="account-photo-row">
+                    <img className="account-settings-avatar" src={avatarUrl} alt="Фото профиля" />
+                    <div className="account-photo-actions">
+                      <button type="button" className="account-upload" onClick={() => avatarInputRef.current?.click()}>Загрузить новое фото</button>
+                      {avatarUrl !== DEFAULT_AVATAR_URL && <button type="button" className="account-reset-photo" onClick={() => setAvatarUrl(DEFAULT_AVATAR_URL)}>Вернуть стандартный аватар</button>}
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveAccountModal(null)}
-                    className="px-3.5 py-1.5 rounded-full bg-white/35 hover:bg-white/55 text-[#1A2E2B] text-[13px] font-medium transition-colors cursor-pointer"
-                  >
-                    Закрыть
-                  </button>
-                </div>
-
-                <div className="bg-[#FAFAFA] rounded-[34px] px-6 pt-6 pb-6">
-                  {activeAccountModal === 'settings' ? (
-                    <form onSubmit={handleSaveSettings} className="space-y-4">
-                      {/* Avatar picker inside settings */}
-                      <div className="flex items-center gap-4">
-                        <div className="w-16 h-16 rounded-full overflow-hidden bg-[#EAEFEF] border border-[#E0E7E6] shrink-0">
-                          <img
-                            src={avatarUrl}
-                            alt={userName}
-                            referrerPolicy="no-referrer"
-                            className="w-full h-full object-cover"
-                          />
-                        </div>
-                        <div className="flex flex-col gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => avatarInputRef.current?.click()}
-                            className="px-3.5 py-1.5 rounded-xl bg-white border border-[#E2E8E7] hover:border-[#A8C7C7] text-[13px] font-medium text-[#1A2E2B] transition-colors cursor-pointer"
-                          >
-                            Загрузить новое фото
-                          </button>
-                          {avatarUrl !== DEFAULT_AVATAR_URL && (
-                            <button
-                              type="button"
-                              onClick={() => setAvatarUrl(DEFAULT_AVATAR_URL)}
-                              className="text-[12px] text-[#6E7A78] hover:text-[#1A2E2B] text-left cursor-pointer"
-                            >
-                              Вернуть стандартный аватар
-                            </button>
-                          )}
-                        </div>
-                      </div>
-
-                      <div>
-                        <label className="block text-[12.5px] font-medium text-[#6E7A78] mb-1.5 px-1">
-                          Имя пользователя
-                        </label>
-                        <input
-                          type="text"
-                          value={settingsNameInput}
-                          onChange={(e) => setSettingsNameInput(e.target.value)}
-                          placeholder="Ваше имя"
-                          className="w-full h-[50px] bg-white border border-[#EBEBEB] focus:border-[#A8C7C7] rounded-[18px] px-4 text-[14.5px] text-[#1A2E2B] focus:outline-none transition-colors"
-                        />
-                      </div>
-
-                      <button
-                        type="submit"
-                        className="w-full h-[52px] rounded-[18px] bg-[#A8C7C7] hover:bg-[#97B8B8] text-[#1A2E2B] font-semibold text-[14.5px] transition-all cursor-pointer"
-                      >
-                        Сохранить изменения
+                  <label className="account-field">Имя пользователя
+                    <input type="text" value={settingsNameInput} onChange={e => setSettingsNameInput(e.target.value)} required maxLength={100} autoComplete="name" />
+                  </label>
+                  <label className="account-field">Email
+                    <input type="email" value={patient?.email || ''} readOnly autoComplete="email" />
+                  </label>
+                  <label className="account-field">Телефон
+                    <input type="tel" value={patient?.phone || ''} readOnly autoComplete="tel" />
+                  </label>
+                  <button type="submit" className="account-save" disabled={settingsSaving}>{settingsSaving ? 'Сохраняю…' : 'Сохранить изменения'}</button>
+                </form>
+              ) : (
+                <section className="account-plan" aria-label="Календарь реабилитации">
+                  <p className="account-plan-status">{snapshot.plan ? (selectedOperation || 'Подтверждённый план реабилитации') : 'План пока не сохранён. Загрузите документ и подтвердите назначения.'}</p>
+                  <div className="account-calendar-nav">
+                    <button type="button" aria-label="Предыдущий месяц" onClick={() => shiftMonth(-1)}><span aria-hidden="true">‹</span></button>
+                    <h2 aria-live="polite">{monthLabel}</h2>
+                    <button type="button" aria-label="Следующий месяц" onClick={() => shiftMonth(1)}><span aria-hidden="true">›</span></button>
+                  </div>
+                  <div className="account-calendar">
+                    {['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map(day => <span key={day} className="account-weekday">{day}</span>)}
+                    {Array.from({ length: firstWeekday }, (_, i) => <span key={`empty-${i}`} />)}
+                    {Array.from({ length: daysInMonth }, (_, i) => {
+                      const day = i + 1;
+                      const date = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                      const hasEvents = snapshot.events.some(event => event.scheduled_date === date && ['pending', 'completed'].includes(event.status));
+                      return <button type="button" key={date} className={`account-day ${calendarDate === date ? 'is-selected' : ''}`} aria-label={date} aria-pressed={calendarDate === date} onClick={() => setCalendarDate(date)}>{day}{hasEvents && <span className="account-event-dot" />}</button>;
+                    })}
+                  </div>
+                  <div className="account-day-tasks" aria-live="polite">
+                    <h3>Задачи на {calendarDate}</h3>
+                    {tasks.length ? <ul>{tasks.map(task => <li key={task.id}>
+                      <button type="button" className={`account-task ${task.completed ? 'is-completed' : ''}`} onClick={() => void toggleTask(task.id)} disabled={savingEvents.includes(task.id)} aria-pressed={task.completed} title={snapshot.events.find(event => event.id === task.id)?.description}>
+                        <span className="account-task-check" aria-hidden="true">{task.completed ? '✓' : ''}</span><span>{task.text}</span>
                       </button>
-                    </form>
-                  ) : (
-                    <div className="space-y-3.5">
-                      <div className="p-4 rounded-[20px] bg-white border border-[#EBEBEB]">
-                        <div className="text-[12.5px] text-[#7D8986]">Текущий этап</div>
-                        <div className="text-[15.5px] font-semibold text-[#1A2E2B] mt-0.5">
-                          {snapshot.plan ? 'Подтверждённый план' : 'План ещё не подтверждён'}
-                        </div>
-                      </div>
-                      <div className="space-y-2.5 max-h-[340px] overflow-auto">
-                        {snapshot.events.filter(e=>e.status!=='cancelled').map((event) => ({id:event.id,text:`${event.scheduled_date} · ${event.scheduled_time?.slice(0,5) || 'Без времени'} · ${event.title}`,completed:event.status==='completed'})).map((t) => (
-                          <div
-                            key={t.id}
-                            onClick={() => toggleTask(t.id)}
-                            className="flex items-center gap-3 p-3 rounded-[16px] bg-white border border-[#F0F0F0] cursor-pointer hover:border-[#A8C7C7]/60 transition-colors"
-                          >
-                            <span
-                              className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 ${
-                                t.completed
-                                  ? 'bg-[#1A2E2B] text-white'
-                                  : 'border-[1.5px] border-[#9BA6A4]'
-                              }`}
-                            >
-                              {t.completed && (
-                                <svg
-                                  viewBox="0 0 16 16"
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth="2.2"
-                                  className="w-3 h-3"
-                                >
-                                  <path d="M3.8 8.3L6.6 11L12.2 5" />
-                                </svg>
-                              )}
-                            </span>
-                            <span className="text-[14px] text-[#1A2E2B]">{t.text}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Main Center Profile Card modeled after the reference image */}
-        <main
-          className={`flex-1 flex items-center justify-center px-4 sm:px-8 pb-10 transition-all duration-200 ${
-            activeAccountModal ? 'blur-[6px] pointer-events-none select-none' : ''
-          }`}
-        >
-          <motion.div
-            initial={{ opacity: 0, y: 10, scale: 0.99 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-            className="w-full max-w-[780px] rounded-[38px] bg-white/85 p-2.5 shadow-[0_20px_60px_rgba(26,46,43,0.08)] border border-[#ECECEC]"
-          >
-            <div className="relative w-full min-h-[420px] sm:min-h-[440px] rounded-[30px] bg-white overflow-hidden flex flex-col justify-between p-7 sm:p-10">
-              {/* Right-side Trail Runner Background Image with smooth left white gradient blend */}
-              <div className="absolute inset-y-0 right-0 w-[72%] sm:w-[66%] h-full pointer-events-none select-none">
-                <img
-                  src={TRAIL_RUNNER_BG_URL}
-                  alt="Восстановление и движение"
-                  referrerPolicy="no-referrer"
-                  className="w-full h-full object-cover object-center"
-                />
-                {/* Soft multi-stop gradient fading the photo into pure white on the left */}
-                <div
-                  className="absolute inset-0"
-                  style={{
-                    background:
-                      'linear-gradient(90deg, #FFFFFF 0%, #FFFFFF 22%, rgba(255,255,255,0.92) 38%, rgba(255,255,255,0.35) 62%, rgba(255,255,255,0) 85%)',
-                  }}
-                />
+                    </li>)}</ul> : <p>На эту дату задач нет.</p>}
+                  </div>
+                </section>
+              )}
+            </>
+          ) : (
+            <div className="account-profile-inner">
+              <div className="account-cover" aria-hidden="true"><img src={TRAIL_RUNNER_BG_URL} alt="" /></div>
+              <button type="button" className="account-settings-button" onClick={openSettingsModal} aria-label="Настройки профиля">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="m9.5 3 .5-2h4l.5 2 2 .9 1.8-1 2.8 2.8-1 1.8.9 2 2 .5v4l-2 .5-.9 2 1 1.8-2.8 2.8-1.8-1-2 .9-.5 2h-4l-.5-2-2-.9-1.8 1-2.8-2.8 1-1.8-.9-2-2-.5v-4l2-.5.9-2-1-1.8 2.8-2.8 1.8 1z" />
+                </svg>
+              </button>
+              <div className="account-identity">
+                <button type="button" className="account-avatar" onClick={() => avatarInputRef.current?.click()} aria-label="Изменить фото профиля"><img src={avatarUrl} alt="Фото профиля" /></button>
+                <h1>{userName}</h1>
+                {selectedOperation && <p>{selectedOperation}</p>}
               </div>
-
-              {/* Top Section: Avatar (uploadable/changeable) + User Name below it */}
-              <div className="relative z-10 flex flex-col items-start max-w-[380px]">
-                {/* Circular Avatar with hover/click upload trigger */}
-                <div className="relative group">
-                  <button
-                    type="button"
-                    onClick={() => avatarInputRef.current?.click()}
-                    title="Нажмите, чтобы изменить аватар"
-                    className="w-[96px] h-[96px] rounded-full bg-[#EFEFEF] overflow-hidden ring-4 ring-white shadow-[0_6px_20px_rgba(0,0,0,0.06)] relative flex items-center justify-center cursor-pointer focus:outline-none"
-                  >
-                    <img
-                      src={avatarUrl}
-                      alt={userName}
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-                    />
-                    <div className="absolute inset-0 bg-[#1A2E2B]/45 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center text-white text-[11px] font-medium">
-                      <svg
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        className="w-5 h-5 mb-0.5"
-                      >
-                        <path d="M23 19C23 19.5304 22.7893 20.0391 22.4142 20.4142C22.0391 20.7893 21.5304 21 21 21H3C2.46957 21 1.96086 20.7893 1.58579 20.4142C1.21071 20.0391 1 19.5304 1 19V8C1 7.46957 1.21071 6.96086 1.58579 6.58579C1.96086 6.21071 2.46957 6 3 6H7L9 3H15L17 6H21C21.5304 6 22.0391 6.21071 22.4142 6.58579C22.7893 6.96086 23 7.46957 23 8V19Z" />
-                        <circle cx="12" cy="13" r="4" />
-                      </svg>
-                      <span>Фото</span>
-                    </div>
-                  </button>
-                </div>
-
-                {/* User Name (set during registration) */}
-                <h2 className="mt-5 text-[26px] sm:text-[28px] font-bold text-[#1A2E2B] tracking-tight leading-snug">
-                  {userName}
-                </h2>
-                {selectedOperation && (
-                  <p className="mt-1 text-[14px] text-[#5B6866] font-normal">
-                    {selectedOperation}
-                  </p>
-                )}
-              </div>
-
-              {/* Bottom Row:
-                  - Left: "Настройки" and "План реабилитации" buttons
-                  - Right (in place of "Get in touch"): "Выйти из аккаунта" button
-              */}
-              <div className="relative z-10 flex flex-col sm:flex-row items-start sm:items-end justify-between gap-4 mt-12">
-                {/* Left buttons: Настройки & План реабилитации */}
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <button
-                    type="button"
-                    onClick={openSettingsModal}
-                    className="h-[48px] px-5 rounded-[18px] bg-[#F5F7F6] hover:bg-[#A8C7C7]/35 border border-[#E6ECEB] text-[14.5px] font-medium text-[#1A2E2B] inline-flex items-center gap-2.5 transition-all cursor-pointer"
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.7"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      className="w-[17px] h-[17px] text-[#1A2E2B]"
-                    >
-                      <circle cx="12" cy="12" r="3" />
-                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-                    </svg>
-                    <span>Настройки</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setActiveAccountModal('plan')}
-                    className="h-[48px] px-5 rounded-[18px] bg-[#F5F7F6] hover:bg-[#A8C7C7]/35 border border-[#E6ECEB] text-[14.5px] font-medium text-[#1A2E2B] inline-flex items-center gap-2.5 transition-all cursor-pointer"
-                  >
-                    <StethoscopeOutlineIcon className="w-[17px] h-[17px] text-[#1A2E2B]" />
-                    <span>План реабилитации</span>
-                  </button>
-                </div>
-
-                {/* Right pill button (in place of "Get in touch" on the reference card): Logout */}
-                <button
-                  type="button"
-                  onClick={() => void handleLogout()}
-                  className="h-[52px] px-8 rounded-full bg-white hover:bg-[#FAFAFA] active:scale-95 text-[#1A2E2B] text-[15px] font-semibold shadow-[0_10px_28px_rgba(0,0,0,0.14)] flex items-center justify-center transition-all cursor-pointer shrink-0"
-                >
-                  Выйти из аккаунта
-                </button>
+              <div className="account-profile-actions">
+                <button type="button" className="account-plan-button" onClick={() => {setCalendarMonth(calendarDate.slice(0, 7));setActiveAccountModal('plan');}}><StethoscopeOutlineIcon /><span>План реабилитации</span></button>
+                <button type="button" className="account-logout" onClick={() => void handleLogout()}>Выйти из аккаунта</button>
               </div>
             </div>
-          </motion.div>
+          )}
         </main>
       </div>
     );
@@ -1084,7 +899,7 @@ export default function App() {
                   <div className="pt-2">
                     <button
                       type="submit"
-                      disabled={authBusy || restoringSession}
+                      disabled={authBusy}
                       className="w-full h-[54px] rounded-[18px] bg-[#A8C7C7] hover:bg-[#97B8B8] active:scale-[0.99] text-[#1A2E2B] font-semibold text-[15px] flex items-center justify-center gap-2 transition-all shadow-[0_6px_20px_rgba(168,199,199,0.35)] cursor-pointer"
                     >
                       <span>
