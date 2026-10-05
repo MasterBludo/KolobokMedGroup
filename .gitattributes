@@ -1,2 +1,18 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Keep local tooling and generated files out of git archive exports.
+**/node_modules export-ignore
+**/dist export-ignore
+**/build export-ignore
+**/coverage export-ignore
+**/__pycache__ export-ignore
+**/*.py[cod] export-ignore
+**/.venv export-ignore
+**/venv export-ignore
+**/env export-ignore
+**/.idea export-ignore
+**/.vscode export-ignore
+**/.DS_Store export-ignore
+**/Thumbs.db export-ignore
+**/Desktop.ini export-ignore

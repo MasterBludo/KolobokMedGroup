@@ -1,20 +1,33 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Recovery UI
 
-# Run and deploy your AI Studio app
+Frontend приложения Recovery: React 19, TypeScript, Vite 8, Tailwind CSS 4 и Motion.
 
-This contains everything you need to run your app locally.
+Полное описание продукта, установка Node.js/Python/PostgreSQL, настройка GigaChat, миграции и запуск доступны в [основном README](../README.md).
 
-View your app in AI Studio: https://ai.studio/apps/994f438a-0283-4077-af2e-a376e93d995a
+Зависимости обоих npm-пакетов устанавливаются **из корня репозитория**:
 
-## Run Locally
+```bash
+npm ci
+```
 
-**Prerequisites:**  Node.js
+После подготовки базы и корневого `.env` запустите из корня два процесса в отдельных терминалах:
 
+```bash
+npm run dev:backend
+```
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+```bash
+npm --workspace UI run dev:frontend
+```
+
+Откройте http://localhost:5173. Vite проксирует `/api` на http://localhost:3000. Вход, регистрация, чат и сохранение требуют работающего backend; персональные данные хранятся в PostgreSQL. Сервер читает корневой `.env`, ключ Gemini не используется.
+
+Команды из каталога `UI`:
+
+```bash
+npm run dev:frontend
+npm run typecheck
+npm run build
+```
+
+Сборка записывается в корневой `dist/`. `npm run preview` показывает frontend-сборку, но не запускает API; для полного приложения используйте описанную в основном README раздачу через Express.

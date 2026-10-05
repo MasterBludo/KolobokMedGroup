@@ -1,6 +1,0 @@
-{
-  "name": "Recovery — Помощник по восстановлению",
-  "description": "Интерактивный интерфейс платформы послеоперационного восстановления и реабилитации Recovery.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
