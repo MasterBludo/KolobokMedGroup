@@ -27,8 +27,8 @@
     "noEmit": true
   },
   "include": [
-    "server.ts",
-    "python-runtime.ts",
-    "schedule-json.ts"
+    "*.ts",
+    "tests/*.ts",
+    "scripts/*.ts"
   ]
 }

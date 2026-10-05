@@ -5,10 +5,14 @@ import os from "os";
 import https from "https";
 import crypto from "crypto";
 import dotenv from "dotenv";
+import { pathToFileURL } from "node:url";
+import { checkDatabase } from "./db";
+import { ApiError, authRouter, authenticate, protectOrigins, validateAuthConfig, wrap } from "./auth";
+import { recoveryRouter, savedContext, Processing } from "./recovery";
 import { parseScheduleJson } from "./schedule-json";
 import { runPythonScript } from "./python-runtime";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const httpsAgent = new https.Agent({
   rejectUnauthorized: false,
@@ -160,7 +164,7 @@ function addDays(baseIso: string, days: number): string {
 
 interface ReminderItem {
   date: string;
-  time: string;
+  time: string | null;
   title: string;
   description: string;
 }
@@ -169,9 +173,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function normalizeTime(timeValue: unknown): string {
+function normalizeTime(timeValue: unknown): string | null {
   const match = String(timeValue || "").trim().match(/^(\d{1,2}):(\d{2})$/);
-  if (!match) return "09:00";
+  if (!match) return null;
   const hh = Math.min(23, Math.max(0, Number(match[1])));
   const mm = Math.min(59, Math.max(0, Number(match[2])));
   return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
@@ -185,7 +189,7 @@ function isValidIsoDate(dateStr: unknown): dateStr is string {
   );
 }
 
-function expandAndValidateSchedule(rawText: string, startDate: string): ReminderItem[] {
+export function expandAndValidateSchedule(rawText: string, startDate: string): ReminderItem[] {
   const parsed = parseScheduleJson(rawText);
 
   const results: ReminderItem[] = [];
@@ -227,8 +231,8 @@ function expandAndValidateSchedule(rawText: string, startDate: string): Reminder
       const times =
         Array.isArray(rawRule.times) && rawRule.times.length > 0
           ? rawRule.times.filter((time): time is string => typeof time === "string")
-          : ["09:00"];
-      const validTimes = times.length > 0 ? times : ["09:00"];
+          : [];
+      const validTimes: Array<string | null> = times.length > 0 ? times : [null];
 
       const ruleBaseDate =
         isValidIsoDate(rawRule.exact_date)
@@ -255,7 +259,7 @@ function expandAndValidateSchedule(rawText: string, startDate: string): Reminder
 
   const uniqueMap = new Map<string, ReminderItem>();
   for (const r of results) {
-    uniqueMap.set(`${r.date}|${r.time}|${r.title}`, r);
+    uniqueMap.set(JSON.stringify([r.date, r.time, r.title, r.description, r.time === null ? uniqueMap.size : null]), r);
   }
 
   const finalReminders = Array.from(uniqueMap.values());
@@ -313,68 +317,28 @@ function buildFallbackReminders(startDate: string): ReminderItem[] {
   return expandAndValidateSchedule(defaultRulesJson, startDate);
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+export async function recognizeDocument(bytes: Buffer, extension: string): Promise<string> {
+  let tempDir: string | null = null;
+  try {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "kolobok-ocr-"));
+    const filePath = path.join(tempDir, `statement.${extension}`);
+    fs.writeFileSync(filePath, bytes);
+    return await runPythonScript(path.join(process.cwd(), "ocrtest.py"), filePath, process.env.PYTHON_EXECUTABLE);
+  } catch {
+    throw new ApiError(502, "Не удалось распознать документ. Проверьте Python, OCR-зависимости и доступ к моделям.");
+  } finally {
+    if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
 
-  app.use(express.json());
-
-  app.post(
-    "/api/ocr",
-    express.raw({ type: "application/octet-stream", limit: "20mb" }),
-    async (req, res) => {
-      const extension = String(req.query.extension || "").toLowerCase();
-      const allowedExtensions = new Set(["pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp"]);
-      if (!allowedExtensions.has(extension)) {
-        res.status(400).json({ error: "Выберите PDF-файл или изображение." });
-        return;
-      }
-      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
-        res.status(400).json({ error: "Загруженный файл пуст или не распознан." });
-        return;
-      }
-
-      let tempDir: string | null = null;
-      try {
-        tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "kolobok-ocr-"));
-        const filePath = path.join(tempDir, `statement.${extension}`);
-        fs.writeFileSync(filePath, req.body);
-        const scriptPath = path.join(process.cwd(), "ocrtest.py");
-        const text = await runPythonScript(
-          scriptPath,
-          filePath,
-          process.env.PYTHON_EXECUTABLE
-        );
-        res.json({ text });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        res.status(500).json({ error: `Не удалось распознать документ: ${message}` });
-      } finally {
-        if (tempDir) {
-          fs.rmSync(tempDir, { recursive: true, force: true });
-        }
-      }
-    }
-  );
-
-  app.post("/api/generate-schedule", async (req, res) => {
-    const { recommendationsText, startDate, model } = req.body as {
-      recommendationsText?: string;
-      startDate?: string;
-      model?: string;
-    };
-
-    const baseDate = startDate || new Date().toISOString().slice(0, 10);
+export async function generateSchedule(recommendationsText: string, startDate: string, model?: string) {
+    const baseDate = startDate;
     const preferredModel = model || process.env.GIGACHAT_MODEL || "GigaChat-Pro";
     const credentials = resolveGigaChatCredentials();
     const scope = process.env.GIGACHAT_SCOPE || "GIGACHAT_API_PERS";
 
     if (!credentials) {
-      res.json({
-        reminders: buildFallbackReminders(baseDate),
-        usedModel: `${preferredModel} (демо-валидатор)`,
-      });
-      return;
+      return { reminders: buildFallbackReminders(baseDate), usedModel: `${preferredModel} (демо-валидатор)`, demo: true };
     }
 
     try {
@@ -429,17 +393,26 @@ ${recommendationsText || ""}`;
         reminders = expandAndValidateSchedule(repairedResponse.reply, baseDate);
         usedModel = repairedResponse.usedModel;
       }
-      res.json({ reminders, usedModel });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      res.status(500).json({ error: `Ошибка генерации расписания: ${message}` });
+      return { reminders, usedModel, demo: false };
+    } catch {
+      throw new ApiError(502, "Не удалось сформировать расписание через GigaChat. Повторите попытку.");
     }
-  });
+}
 
-  app.post("/api/chat", async (req, res) => {
-    const { messages, recommendationsText, model } = req.body as {
+export function createApp(processing: Processing = { recognize: recognizeDocument, generate: generateSchedule }) {
+  const app = express();
+
+  app.use(express.json({ limit: "256kb" }));
+
+  app.use("/api", protectOrigins);
+  app.use("/api/auth", authRouter());
+  app.use("/api/ocr", express.raw({ type: "application/octet-stream", limit: "20mb" }));
+  app.use("/api", recoveryRouter(processing));
+
+  app.post("/api/chat", authenticate, wrap(async (req, res) => {
+    const { messages, model, caseId } = req.body as {
       messages?: Array<{ role: string; content: string }>;
-      recommendationsText?: string;
+      caseId?: string;
       model?: string;
     };
 
@@ -452,6 +425,7 @@ ${recommendationsText || ""}`;
     const credentials = resolveGigaChatCredentials();
     const scope = process.env.GIGACHAT_SCOPE || "GIGACHAT_API_PERS";
 
+    const recommendationsText = caseId ? await savedContext(caseId, res.locals.patient.id) : "";
     if (!credentials) {
       res.json({
         reply:
@@ -478,11 +452,10 @@ ${recommendationsText || ""}`;
         0.5
       );
       res.json({ reply });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      res.status(500).json({ error: `Ошибка обращения к GigaChat: ${message}` });
+    } catch {
+      res.status(502).json({ error: "Не удалось получить ответ GigaChat. Повторите попытку." });
     }
-  });
+  }));
 
   if (process.env.NODE_ENV === "production") {
     const distPath = path.join(process.cwd(), "dist");
@@ -504,20 +477,27 @@ ${recommendationsText || ""}`;
         return;
       }
 
-      const status =
-        typeof error === "object" && error !== null && "status" in error &&
-        typeof error.status === "number"
-          ? error.status
-          : 500;
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`API error (${status}):`, error);
+      const status = error instanceof ApiError ? error.status :
+        (typeof error === "object" && error !== null && "status" in error && typeof error.status === "number" ? error.status : 500);
+      // Never log request bodies, database errors, query parameters, or secrets.
+      const message = error instanceof ApiError ? error.message :
+        status === 413 ? "Загруженный файл слишком большой." : "Сервис временно недоступен. Проверьте подключение к базе данных.";
       res.status(status).json({ error: message });
     }
   );
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  return app;
 }
 
-startServer();
+async function startServer() {
+  validateAuthConfig();
+  await checkDatabase();
+  createApp().listen(3000, "0.0.0.0", () => console.log("Server running on http://localhost:3000"));
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  startServer().catch(error => {
+    console.error(error instanceof Error && /configuration missing|PGPORT|numbered migrations|Cannot connect|Production requires|APP_ORIGINS/.test(error.message)
+      ? error.message : "Backend startup failed. Check local configuration.");
+    process.exitCode = 1;
+  });
+}

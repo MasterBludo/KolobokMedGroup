@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { api, Patient, RecoveryCase, PlanSnapshot, PlanPreview, patientToday } from './api';
 
 interface Message {
   id: string;
@@ -28,14 +29,6 @@ interface ReminderItem {
 
 const DEFAULT_AVATAR_URL = '/src/assets/images/default_user_avatar_1791136890330.jpg';
 const TRAIL_RUNNER_BG_URL = '/src/assets/images/trail_runner_bg_1791136878819.jpg';
-
-const INITIAL_TASKS: TaskItem[] = [
-  { id: '1', text: 'Update portfolio website.', completed: true },
-  { id: '2', text: 'Reply to client feedback.', completed: true },
-  { id: '3', text: 'Schedule X posts.', completed: true },
-  { id: '4', text: 'Export assets for dev handoff.', completed: false },
-  { id: '5', text: 'Boost top-performing post.', completed: false },
-];
 
 const OPERATIONS_LIST = [
   'Эндопротезирование тазобедренного сустава',
@@ -237,7 +230,7 @@ export default function App() {
   const [currentScreen, setCurrentScreen] = useState<'main' | 'account'>('main');
 
   // User Profile states (Name from registration + customizable Avatar)
-  const [userName, setUserName] = useState<string>('Aiwanfo Faith');
+  const [userName, setUserName] = useState<string>('');
   const [avatarUrl, setAvatarUrl] = useState<string>(DEFAULT_AVATAR_URL);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -270,11 +263,119 @@ export default function App() {
 
   // Tasks hover popover states
   const [isTasksOpen, setIsTasksOpen] = useState<boolean>(false);
-  const [tasks, setTasks] = useState<TaskItem[]>(INITIAL_TASKS);
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [isAddingTask, setIsAddingTask] = useState<boolean>(false);
   const [newTaskText, setNewTaskText] = useState<string>('');
   const tasksTimeoutRef = useRef<number | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  const [patient, setPatient] = useState<Patient | null>(null);
+  const [cases, setCases] = useState<RecoveryCase[]>([]);
+  const [caseId, setCaseId] = useState('');
+  const [snapshot, setSnapshot] = useState<PlanSnapshot>({ plan:null, prescriptions:[], events:[] });
+  const [draftId, setDraftId] = useState<string | null>(null);
+  const [startDate, setStartDate] = useState('');
+  const [calendarDate, setCalendarDate] = useState('');
+  const [planPreview, setPlanPreview] = useState<PlanPreview | null>(null);
+  const [conflictDecisions, setConflictDecisions] = useState<Record<string,string>>({});
+  const [persistenceError, setPersistenceError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+  const [restoringSession, setRestoringSession] = useState(true);
+  const [savingEvents, setSavingEvents] = useState<string[]>([]);
+  const [caseBusy, setCaseBusy] = useState(false);
+  const patientRef = useRef<string | null>(null);
+  const selectedCaseRef = useRef('');
+
+  const clearPatientState = () => {
+    patientRef.current=null;selectedCaseRef.current='';setPatient(null);setIsAuthorized(false);setUserName('');setAvatarUrl(DEFAULT_AVATAR_URL);
+    setCases([]);setCaseId('');setTasks([]);setSnapshot({plan:null,prescriptions:[],events:[]});
+    setDraftId(null);setPlanPreview(null);setCurrentScreen('main');setIsTasksOpen(false);setActiveAccountModal(null);
+    setRecommendationsText('');setPendingStatementText(null);setPendingStatementMessageId(null);setAttachedFileName(null);
+    setAuthPassword('');setAuthEmail('');setAuthName('');setHasInput(false);setInputResetKey(key=>key+1);
+    setMessages([{id:'welcome',sender:'assistant',text:'Привет, чем я могу помочь с восстановлением?'}]);
+  };
+  useEffect(()=>{
+    const expired=()=>{clearPatientState();setPersistenceError('Сессия истекла. Войдите снова.');setIsAuthModalOpen(true);};
+    window.addEventListener('recovery-session-expired',expired);
+    return ()=>window.removeEventListener('recovery-session-expired',expired);
+  },[]);
+  const applySnapshot = (value:PlanSnapshot) => {
+    setSnapshot(value);
+    setRecommendationsText(value.plan?.confirmed_instructions || '');
+  };
+  const loadCases = async (current:Patient) => {
+    const data=await api<{cases:RecoveryCase[]}>('/cases');
+    if (patientRef.current!==current.id) return;
+    setCases(data.cases);
+    const stored=localStorage.getItem(`recovery-case:${current.id}`);
+    const selected=data.cases.find(c=>c.id===stored) || data.cases[0];
+    setCaseId(selected?.id || '');
+  };
+  const acceptPatient = async (current:Patient) => {
+    patientRef.current=current.id;setPatient(current);setUserName(current.username);setIsAuthorized(true);
+    setCalendarDate(patientToday(current.timezone));
+    setTasks([]);setSnapshot({plan:null,prescriptions:[],events:[]});
+    await loadCases(current);
+  };
+  useEffect(() => {
+    let live=true;
+    api<{patient:Patient|null}>('/auth/me').then(async data=>{
+      if (live && data.patient) await acceptPatient(data.patient);
+    }).catch(error=>{if(live)setPersistenceError(error.message);}).finally(()=>{if(live)setRestoringSession(false);});
+    return ()=>{live=false;};
+  },[]);
+  useEffect(() => {
+    selectedCaseRef.current=caseId;
+    setDraftId(null);setPlanPreview(null);setPendingStatementText(null);setPendingStatementMessageId(null);
+    setHasInput(false);setInputResetKey(key=>key+1);setMessages([{id:'welcome',sender:'assistant',text:'Привет, чем я могу помочь с восстановлением?'}]);
+    setAttachedFileName(null);setRecommendationsText('');setSnapshot({plan:null,prescriptions:[],events:[]});setTasks([]);
+    const selected=cases.find(c=>c.id===caseId);
+    setSelectedOperation(selected?.procedure_name || null);setStartDate(selected?.recovery_start_date || '');
+    if (!caseId || !patient) return;
+    localStorage.setItem(`recovery-case:${patient.id}`,caseId);
+    let live=true;
+    api<PlanSnapshot>(`/cases/${caseId}/plan`).then(value=>{if(live)applySnapshot(value);}).catch(error=>{if(live)setPersistenceError(error.message);});
+    return ()=>{live=false;};
+  },[caseId,patient?.id]);
+  useEffect(() => {
+    setTasks(snapshot.events.filter(e=>e.scheduled_date===calendarDate && ['pending','completed'].includes(e.status)).map(e=>({id:e.id,text:`${e.scheduled_time?.slice(0,5) || 'Без времени'} · ${e.title}`,completed:e.status==='completed'})));
+  },[snapshot,calendarDate]);
+  const createCase = async () => {
+    if (!selectedOperation) {setPersistenceError('Выберите операцию для нового эпизода.');return;}
+    if (caseBusy) return;
+    setCaseBusy(true);setPersistenceError('');
+    try {
+      const data=await api<{recoveryCase:RecoveryCase}>('/cases',{method:'POST',body:JSON.stringify({procedureName:selectedOperation,startDate:null})});
+      setCases(prev=>[data.recoveryCase,...prev]);setCaseId(data.recoveryCase.id);
+    } catch(error) {setPersistenceError((error as Error).message);} finally {setCaseBusy(false);}
+  };
+  const handleLogout = async () => {
+    try {
+      if (draftId && !await cancelDraft()) return;
+      await api('/auth/logout',{method:'POST'});
+      clearPatientState();setPersistenceError('');
+    } catch(error) {setPersistenceError((error as Error).message);}
+  };
+  const handlePersistPlan = async () => {
+    if (!planPreview || isGeneratingSchedule) return;
+    const savingCase=caseId, savingPatient=patientRef.current;
+    setIsGeneratingSchedule(true);setPersistenceError('');
+    try {
+      const value=await api<PlanSnapshot>('/plans/confirm',{method:'POST',body:JSON.stringify({draftId:planPreview.draftId,version:planPreview.version,decisions:conflictDecisions})});
+      if (patientRef.current!==savingPatient || selectedCaseRef.current!==savingCase) return;
+      applySnapshot(value);setPlanPreview(null);setPendingStatementText(null);setPendingStatementMessageId(null);setDraftId(null);
+      setCases(prev=>prev.map(c=>c.id===caseId ? {...c,recovery_start_date:planPreview.startDate}:c));setStartDate(planPreview.startDate);
+      setMessages(prev=>[...prev,{id:`saved-${Date.now()}`,sender:'assistant',text:'План сохранён. Задачи и отметки выполнения доступны после перезагрузки.'}]);
+    } catch(error) {setPersistenceError((error as Error).message);} finally {setIsGeneratingSchedule(false);}
+  };
+  const cancelDraft = async () => {
+    if (draftId) {
+      try {await api(`/drafts/${draftId}`,{method:'DELETE'});} catch(error){setPersistenceError((error as Error).message);return false;}
+    }
+    setDraftId(null);setPlanPreview(null);setPendingStatementText(null);setPendingStatementMessageId(null);setAttachedFileName(null);
+    setMessages(prev=>prev.filter(message=>message.id!==pendingStatementMessageId));
+    return true;
+  };
 
   // Keep chat mode stable while the input changes; only empty/non-empty boundaries matter.
   const isChatMode =
@@ -301,6 +402,7 @@ export default function App() {
       return;
     }
 
+    if (!isAuthorized) {setIsAuthModalOpen(true);return;}
     const userMsg: Message = {
       id: `user-${Date.now()}`,
       sender: 'user',
@@ -310,13 +412,7 @@ export default function App() {
     const nextMessages = [...messages, userMsg];
     setMessages(nextMessages);
     setIsSendingMessage(true);
-
-    const context = [
-      selectedOperation ? `Операция: ${selectedOperation}` : '',
-      recommendationsText ? `Рекомендации из выписки:\n${recommendationsText}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n\n');
+    const chatPatient=patientRef.current;
 
     try {
       const response = await fetch('/api/chat', {
@@ -327,16 +423,18 @@ export default function App() {
             role: message.sender,
             content: message.text,
           })),
-          recommendationsText: context,
+          caseId: caseId || undefined,
         }),
       });
       const data: { reply?: string; error?: string } = await response.json();
+      if (response.status===401) window.dispatchEvent(new Event('recovery-session-expired'));
       if (!response.ok) {
         throw new Error(data.error || 'Не удалось получить ответ от сервера.');
       }
       if (!data.reply) {
         throw new Error('Сервер вернул пустой ответ.');
       }
+      if (patientRef.current!==chatPatient) return;
       const reply = data.reply;
       setMessages((prev) => [
         ...prev,
@@ -345,10 +443,11 @@ export default function App() {
     } catch (error) {
       const errorMessage =
         error instanceof TypeError
-          ? 'Сервер приложения недоступен. Запустите его командой npm run dev и повторите попытку.'
+          ? 'Сервер приложения недоступен. Запустите его командой npm run dev:backend и повторите попытку.'
           : error instanceof Error
             ? error.message
             : 'Ошибка соединения с сервером.';
+      if (patientRef.current!==chatPatient) return;
       setMessages((prev) => [
         ...prev,
         {
@@ -363,6 +462,7 @@ export default function App() {
   };
 
   const handleResetToStart = () => {
+    if (draftId) void cancelDraft();
     setCurrentScreen('main');
     setHasInput(false);
     setInputResetKey((key) => key + 1);
@@ -379,19 +479,14 @@ export default function App() {
     setIsOperationMenuOpen(false);
   };
 
-  const handleAuthSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (authName.trim()) {
-      setUserName(authName.trim());
-    } else if (authEmail.trim() && userName === 'Aiwanfo Faith') {
-      const extracted = authEmail.split('@')[0].trim();
-      if (extracted) setUserName(extracted);
-    }
-    setIsAuthorized(true);
-    setIsAuthModalOpen(false);
-    setAuthEmail('');
-    setAuthPassword('');
-    setAuthName('');
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();if(authBusy)return;setAuthBusy(true);setPersistenceError('');
+    try {
+      const contact=authEmail.trim();
+      const body=authMode==='register' ? {username:authName,email:contact.includes('@') ? contact:undefined,phone:contact.includes('@') ? undefined:contact,password:authPassword,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone} : {contact,password:authPassword};
+      const data=await api<{patient:Patient}>(`/auth/${authMode}`,{method:'POST',body:JSON.stringify(body)});
+      await acceptPatient(data.patient);setIsAuthModalOpen(false);setAuthEmail('');setAuthPassword('');setAuthName('');
+    } catch(error) {setPersistenceError((error as Error).message);} finally {setAuthBusy(false);}
   };
 
   const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -422,33 +517,31 @@ export default function App() {
     }, 180);
   };
 
-  const toggleTask = (id: string) => {
-    setTasks((prev) =>
-      prev.map((task) =>
-        task.id === id ? { ...task, completed: !task.completed } : task
-      )
-    );
+  const toggleTask = async (id:string, completed?:boolean) => {
+    if (savingEvents.includes(id)) return;
+    const event=snapshot.events.find(e=>e.id===id);if(!event || !['pending','completed'].includes(event.status))return;
+    setSavingEvents(prev=>[...prev,id]);setPersistenceError('');
+    try {
+      const data=await api<{event:PlanSnapshot['events'][number]}>(`/events/${id}`,{method:'PATCH',body:JSON.stringify({completed:completed ?? event.status!=='completed'})});
+      setSnapshot(prev=>({...prev,events:prev.events.map(e=>e.id===id ? {...e,...data.event}:e)}));
+    } catch(error) {setPersistenceError((error as Error).message);} finally {setSavingEvents(prev=>prev.filter(value=>value!==id));}
   };
-
-  const handleAddTaskSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmed = newTaskText.trim();
-    if (!trimmed) {
-      setIsAddingTask(false);
-      return;
-    }
-    setTasks((prev) => [
-      ...prev,
-      { id: `task-${Date.now()}`, text: trimmed, completed: false },
-    ]);
-    setNewTaskText('');
-    setIsAddingTask(false);
+  const handleAddTaskSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();const text=newTaskText.trim();if(!text||!caseId)return;
+    try {
+      applySnapshot(await api<PlanSnapshot>(`/cases/${caseId}/tasks`,{method:'POST',body:JSON.stringify({text,date:calendarDate})}));
+      setNewTaskText('');setIsAddingTask(false);
+    } catch(error) {setPersistenceError((error as Error).message);}
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
-    if (!file || isUploadingStatement) return;
+    if (!file || isUploadingStatement || isGeneratingSchedule) return;
+    if (!isAuthorized) {setIsAuthModalOpen(true);return;}
+    if (!caseId) {setPersistenceError('Создайте или выберите эпизод восстановления перед загрузкой.');return;}
+    if (draftId) await cancelDraft();
+    const uploadCaseId=caseId;
 
     setAttachedFileName(file.name);
     setIsUploadingStatement(true);
@@ -456,7 +549,7 @@ export default function App() {
     try {
       const extension = file.name.split('.').pop()?.toLowerCase() || '';
       const ocrResponse = await fetch(
-        `/api/ocr?extension=${encodeURIComponent(extension)}`,
+        `/api/ocr?extension=${encodeURIComponent(extension)}&caseId=${encodeURIComponent(caseId)}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/octet-stream' },
@@ -468,11 +561,11 @@ export default function App() {
         throw new Error(
           ocrResponse.ok
             ? 'Сервис распознавания вернул пустой ответ.'
-            : `Сервис распознавания недоступен (HTTP ${ocrResponse.status}). Запустите приложение командой npm run dev.`
+            : `Сервис распознавания недоступен (HTTP ${ocrResponse.status}). Запустите backend командой npm run dev:backend.`
         );
       }
 
-      let ocrData: { text?: string; error?: string };
+      let ocrData: { text?: string; error?: string; draftId?:string; existing?:boolean } & Partial<PlanSnapshot>;
       try {
         const parsedData: unknown = JSON.parse(responseBody);
         if (!parsedData || typeof parsedData !== 'object' || Array.isArray(parsedData)) {
@@ -486,6 +579,9 @@ export default function App() {
           throw new Error('Сервис распознавания вернул некорректный ответ.');
         }
         ocrData = {
+          ...responseData as Partial<PlanSnapshot>,
+          draftId:typeof responseData.draftId==='string' ? responseData.draftId:undefined,
+          existing:responseData.existing===true,
           text: typeof responseData.text === 'string' ? responseData.text : undefined,
           error: typeof responseData.error === 'string' ? responseData.error : undefined,
         };
@@ -497,9 +593,16 @@ export default function App() {
         }
         throw error;
       }
+      if (ocrResponse.status===401) window.dispatchEvent(new Event('recovery-session-expired'));
       if (!ocrResponse.ok) {
         throw new Error(ocrData.error || 'Не удалось распознать выписку.');
       }
+      if (selectedCaseRef.current!==uploadCaseId) return;
+      if (ocrData.existing && Array.isArray(ocrData.events) && Array.isArray(ocrData.prescriptions)) {
+        applySnapshot(ocrData as PlanSnapshot);
+        setMessages(prev=>[...prev,{id:`existing-${Date.now()}`,sender:'assistant',text:'Этот документ уже сохранён. Загружен существующий план с отметками выполнения.'}]);return;
+      }
+      setDraftId(ocrData.draftId || null);
       if (!ocrData.text?.trim()) {
         throw new Error('В выписке не найден текст.');
       }
@@ -520,7 +623,7 @@ export default function App() {
       setAttachedFileName(null);
       const errorMessage =
         error instanceof TypeError
-          ? 'Сервер приложения недоступен. Запустите его командой npm run dev и повторите попытку.'
+          ? 'Сервер приложения недоступен. Запустите его командой npm run dev:backend и повторите попытку.'
           : error instanceof Error
             ? error.message
             : 'Не удалось распознать выписку.';
@@ -538,91 +641,18 @@ export default function App() {
   };
 
   const handleConfirmStatement = async () => {
-    if (!pendingStatementText || isGeneratingSchedule) return;
-
-    const confirmedText = pendingStatementText;
-    setRecommendationsText(confirmedText);
-    setPendingStatementText(null);
-    setPendingStatementMessageId(null);
-    setIsGeneratingSchedule(true);
-
+    if (!pendingStatementText || !draftId || isGeneratingSchedule) return;
+    if (!startDate) {setPersistenceError('Подтвердите дату начала курса.');return;}
+    setIsGeneratingSchedule(true);setPersistenceError('');
     try {
-      const scheduleResponse = await fetch('/api/generate-schedule', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          recommendationsText: [
-            selectedOperation ? `Операция: ${selectedOperation}` : '',
-            confirmedText,
-          ]
-            .filter(Boolean)
-            .join('\n\n'),
-          startDate: new Date().toISOString().slice(0, 10),
-        }),
-      });
-      const scheduleData: {
-        reminders?: ReminderItem[];
-        usedModel?: string;
-        error?: string;
-      } = await scheduleResponse.json();
-      if (!scheduleResponse.ok) {
-        throw new Error(scheduleData.error || 'Не удалось сформировать расписание.');
-      }
-      if (!Array.isArray(scheduleData.reminders)) {
-        throw new Error('Сервер вернул некорректное расписание.');
-      }
-
-      if (scheduleData.usedModel?.includes('(демо-валидатор)')) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `schedule-${Date.now()}`,
-            sender: 'assistant',
-            text: 'Текст подтверждён и добавлен в контекст чата. Для формирования расписания настройте доступ к GigaChat на сервере.',
-          },
-        ]);
-      } else {
-        const today = new Date().toISOString().slice(0, 10);
-        setTasks(
-          scheduleData.reminders
-            .filter((reminder) => reminder.date === today)
-            .map((reminder, index) => ({
-              id: `reminder-${today}-${index}`,
-              text: `${reminder.time} · ${reminder.title}`,
-              completed: false,
-            }))
-        );
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: `schedule-${Date.now()}`,
-            sender: 'assistant',
-            text: 'Текст выписки подтверждён, добавлен в контекст чата, расписание сформировано.',
-          },
-        ]);
-      }
-    } catch (error) {
-      const errorMessage =
-        error instanceof TypeError
-          ? 'Сервер приложения недоступен. Запустите его командой npm run dev и повторите попытку.'
-          : error instanceof Error
-            ? error.message
-            : 'Не удалось сформировать расписание.';
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `schedule-error-${Date.now()}`,
-          sender: 'assistant',
-          text: `Текст выписки подтверждён и добавлен в контекст чата, но расписание не сформировано: ${errorMessage}`,
-        },
-      ]);
-    } finally {
-      setIsGeneratingSchedule(false);
-    }
+      const generationCase=caseId, generationPatient=patientRef.current;
+      const data=await api<PlanPreview>('/generate-schedule',{method:'POST',body:JSON.stringify({draftId,confirmedText:pendingStatementText,startDate})});
+      if (patientRef.current!==generationPatient || selectedCaseRef.current!==generationCase) return;
+      setPlanPreview(data);setConflictDecisions({});
+    } catch(error) {setPersistenceError((error as Error).message);} finally {setIsGeneratingSchedule(false);}
   };
-
-  const markAllTasksCompleted = () => {
-    setTasks((prev) => prev.map((task) => ({ ...task, completed: true })));
+  const markAllTasksCompleted = async () => {
+    for (const task of tasks.filter(t=>!t.completed)) await toggleTask(task.id,true);
   };
 
   const openSettingsModal = () => {
@@ -630,18 +660,20 @@ export default function App() {
     setActiveAccountModal('settings');
   };
 
-  const handleSaveSettings = (e: React.FormEvent) => {
+  const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (settingsNameInput.trim()) {
-      setUserName(settingsNameInput.trim());
-    }
-    setActiveAccountModal(null);
+    try {
+      const data=await api<{patient:Patient}>('/patient',{method:'PATCH',body:JSON.stringify({username:settingsNameInput})});
+      setPatient(data.patient);setUserName(data.patient.username);setActiveAccountModal(null);
+    } catch(error) {setPersistenceError((error as Error).message);}
   };
+  const statusNotice = (persistenceError || restoringSession) && <div role="status" className="fixed top-2 left-1/2 -translate-x-1/2 z-[70] max-w-[90vw] rounded-[18px] border border-[#EBEBEB] bg-white px-4 py-2 text-[13px] text-[#1A2E2B] shadow-sm" onClick={()=>setPersistenceError('')}>{restoringSession ? 'Проверяю сессию…':persistenceError}</div>;
 
   // SCREEN 6: Account View ("Аккаунт")
   if (currentScreen === 'account') {
     return (
       <div className="h-screen w-full bg-[#FAFAFA] text-[#1A2E2B] flex flex-col justify-between relative overflow-hidden">
+        {statusNotice}
         {/* Hidden file input for Avatar upload */}
         <input
           ref={avatarInputRef}
@@ -779,11 +811,11 @@ export default function App() {
                       <div className="p-4 rounded-[20px] bg-white border border-[#EBEBEB]">
                         <div className="text-[12.5px] text-[#7D8986]">Текущий этап</div>
                         <div className="text-[15.5px] font-semibold text-[#1A2E2B] mt-0.5">
-                          Неделя 2 · Восстановление подвижности
+                          {snapshot.plan ? 'Подтверждённый план' : 'План ещё не подтверждён'}
                         </div>
                       </div>
-                      <div className="space-y-2.5">
-                        {tasks.slice(0, 4).map((t) => (
+                      <div className="space-y-2.5 max-h-[340px] overflow-auto">
+                        {snapshot.events.filter(e=>e.status!=='cancelled').map((event) => ({id:event.id,text:`${event.scheduled_date} · ${event.scheduled_time?.slice(0,5) || 'Без времени'} · ${event.title}`,completed:event.status==='completed'})).map((t) => (
                           <div
                             key={t.id}
                             onClick={() => toggleTask(t.id)}
@@ -936,10 +968,7 @@ export default function App() {
                 {/* Right pill button (in place of "Get in touch" on the reference card): Logout */}
                 <button
                   type="button"
-                  onClick={() => {
-                    setIsAuthorized(false);
-                    setCurrentScreen('main');
-                  }}
+                  onClick={() => void handleLogout()}
                   className="h-[52px] px-8 rounded-full bg-white hover:bg-[#FAFAFA] active:scale-95 text-[#1A2E2B] text-[15px] font-semibold shadow-[0_10px_28px_rgba(0,0,0,0.14)] flex items-center justify-center transition-all cursor-pointer shrink-0"
                 >
                   Выйти из аккаунта
@@ -954,6 +983,7 @@ export default function App() {
 
   return (
     <div className="h-screen w-full bg-[#FAFAFA] text-[#1A2E2B] flex flex-col relative overflow-hidden">
+      {statusNotice}
       {/* Hidden file input for "Прикрепите выписку" */}
       <input
         ref={fileInputRef}
@@ -1087,10 +1117,11 @@ export default function App() {
                   <div className="pt-2">
                     <button
                       type="submit"
+                      disabled={authBusy || restoringSession}
                       className="w-full h-[54px] rounded-[18px] bg-[#A8C7C7] hover:bg-[#97B8B8] active:scale-[0.99] text-[#1A2E2B] font-semibold text-[15px] flex items-center justify-center gap-2 transition-all shadow-[0_6px_20px_rgba(168,199,199,0.35)] cursor-pointer"
                     >
                       <span>
-                        {authMode === 'login' ? 'Войти в аккаунт' : 'Создать аккаунт'}
+                        {authBusy ? 'Подождите…' : authMode === 'login' ? 'Войти в аккаунт' : 'Создать аккаунт'}
                       </span>
                     </button>
                   </div>
@@ -1100,6 +1131,16 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {isAuthorized && <div className="absolute top-[82px] left-1/2 -translate-x-1/2 z-30 flex flex-wrap justify-center items-center gap-2 max-w-[90vw] text-[12px]">
+        <select aria-label="Эпизод восстановления" value={caseId} onChange={e=>{const next=e.target.value;void cancelDraft().then(cancelled=>{if(cancelled)setCaseId(next);});}} disabled={isUploadingStatement || isGeneratingSchedule} className="max-w-[220px] bg-white border border-[#EBEBEB] rounded-full px-3 py-2">
+          <option value="">Выберите эпизод</option>{cases.map(c=><option key={c.id} value={c.id}>{c.procedure_name} · {c.recovery_start_date || 'Дата не подтверждена'}</option>)}
+        </select>
+        <select aria-label="Операция нового эпизода" value={selectedOperation || ''} onChange={e=>setSelectedOperation(e.target.value)} className="max-w-[190px] bg-white border border-[#EBEBEB] rounded-full px-3 py-2">
+          <option value="">Операция</option>{OPERATIONS_LIST.map(op=><option key={op} value={op}>{op}</option>)}
+        </select>
+        <button type="button" disabled={caseBusy || isUploadingStatement || isGeneratingSchedule} onClick={()=>void createCase()} className="bg-[#A8C7C7] rounded-full px-3 py-2">Создать эпизод</button>
+      </div>}
 
       {/* TOP HEADER (Static, never scrolls) */}
       <header className="shrink-0 w-full px-10 md:px-14 pt-8 pb-4 grid grid-cols-3 items-center relative z-40">
@@ -1141,7 +1182,7 @@ export default function App() {
                             Reminders
                           </div>
                           <div className="text-[14px] font-normal text-[#1A2E2B]/70 leading-tight tabular-nums mt-1">
-                            14:17
+                            <input aria-label="Дата задач" type="date" value={calendarDate} onChange={e=>setCalendarDate(e.target.value)} className="bg-transparent max-w-[150px]" />
                           </div>
                         </div>
                         <button
@@ -1165,7 +1206,9 @@ export default function App() {
                               <li key={task.id}>
                                 <button
                                   type="button"
-                                  onClick={() => toggleTask(task.id)}
+                                  onClick={() => void toggleTask(task.id)}
+                                  disabled={savingEvents.includes(task.id)}
+                                  title={snapshot.events.find(e=>e.id===task.id)?.description}
                                   className="flex items-center gap-3 text-left w-full group cursor-pointer"
                                 >
                                   {task.completed ? (
@@ -1218,6 +1261,7 @@ export default function App() {
                         <button
                           type="button"
                           onClick={() => setIsAddingTask(true)}
+                          disabled={!caseId}
                           aria-label="Add task"
                           className="absolute bottom-5 right-5 w-[50px] h-[50px] rounded-full bg-white border border-[#E6ECEB] shadow-[0_4px_14px_rgba(26,46,43,0.06)] flex items-center justify-center text-[#1A2E2B] hover:bg-[#A8C7C7]/25 hover:scale-105 active:scale-95 transition-all cursor-pointer"
                         >
@@ -1426,7 +1470,22 @@ export default function App() {
                       >
                         {msg.text}
                         {msg.id === pendingStatementMessageId && pendingStatementText && (
-                          <div className="flex flex-wrap gap-2 mt-4">
+                          <div className="flex flex-col gap-2 mt-4">
+                            <textarea aria-label="Подтверждённые рекомендации" value={pendingStatementText} onChange={e=>{setPendingStatementText(e.target.value);setPlanPreview(null);}} disabled={isGeneratingSchedule} className="w-full min-h-[120px] rounded-xl border border-[#EBEBEB] p-3 text-[13px]" />
+                            <label className="text-[13px]">Дата начала курса <input type="date" value={startDate} onChange={e=>{setStartDate(e.target.value);setPlanPreview(null);}} disabled={!!cases.find(c=>c.id===caseId)?.recovery_start_date || isGeneratingSchedule} className="rounded-xl border border-[#EBEBEB] p-2" /></label>
+                            {planPreview && <div className="max-h-[280px] overflow-auto text-[13px] space-y-3">
+                              {planPreview.changes.map(change=><div key={change.key} className="border border-[#EBEBEB] rounded-xl p-3">
+                                <strong>{change.title}</strong><p>{change.instruction}</p>
+                                <p>{change.events.length} событий · {change.events[0]?.date} — {change.events.at(-1)?.date}</p>
+                                <details><summary>Все даты и время</summary>{change.events.map((event,index)=><p key={index}>{event.date} · {event.time || 'Без времени'} · {event.description}</p>)}</details>
+                                {!!change.conflicts.length && <><p>Возможное изменение назначения:</p>{change.conflicts.map(conflict=><p key={conflict.id}>{conflict.title}: {conflict.instruction} ({conflict.startsOn} — {conflict.endsOn})</p>)}
+                                  <select aria-label={`Решение: ${change.title}`} value={conflictDecisions[change.key] || ''} onChange={e=>setConflictDecisions(prev=>({...prev,[change.key]:e.target.value}))} className="w-full rounded-xl border border-[#EBEBEB] p-2">
+                                    <option value="">Выберите решение</option><option value="keep">Оставить прежнее назначение</option><option value="separate">Подтвердить как отдельный курс</option><option value="replace" disabled={change.conflicts.some(c=>c.id.startsWith('incoming:'))}>Заменить невыполненные задачи; сохранить выполненные</option>
+                                  </select></>}
+                              </div>)}
+                              <button type="button" onClick={()=>void handlePersistPlan()} disabled={isGeneratingSchedule || planPreview.changes.some(c=>c.conflicts.length && !conflictDecisions[c.key])} className="px-4 py-2 rounded-full bg-[#A8C7C7] disabled:opacity-50 font-semibold">Подтвердить и сохранить план</button>
+                            </div>}
+
                             <button
                               type="button"
                               onClick={() => void handleConfirmStatement()}
@@ -1437,16 +1496,8 @@ export default function App() {
                             </button>
                             <button
                               type="button"
-                              onClick={() => {
-                                const rejectedMessageId = pendingStatementMessageId;
-                                setPendingStatementText(null);
-                                setPendingStatementMessageId(null);
-                                setAttachedFileName(null);
-                                setMessages((prev) =>
-                                  prev.filter((message) => message.id !== rejectedMessageId)
-                                );
-                                fileInputRef.current?.click();
-                              }}
+                              onClick={() => void cancelDraft().then(cancelled=>{if(cancelled)fileInputRef.current?.click();})}
+                              disabled={isGeneratingSchedule}
                               className="px-4 py-2 rounded-full bg-[#F2F4F3] hover:bg-[#E8ECEB] text-[#1A2E2B] text-[13px] font-medium transition-colors cursor-pointer"
                             >
                               Загрузить другое фото
