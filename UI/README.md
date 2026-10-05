@@ -1,23 +1,33 @@
 # Recovery UI
 
-React + TypeScript frontend. Install dependencies with `npm ci` **from the
-repository root**; the root lockfile manages both npm workspaces.
+Frontend приложения Recovery: React 19, TypeScript, Vite 8, Tailwind CSS 4 и Motion.
 
-Start the API in a separate terminal **from the repository root**:
+Полное описание продукта, установка Node.js/Python/PostgreSQL, настройка GigaChat, миграции и запуск доступны в [основном README](../README.md).
+
+Зависимости обоих npm-пакетов устанавливаются **из корня репозитория**:
+
+```bash
+npm ci
+```
+
+После подготовки базы и корневого `.env` запустите из корня два процесса в отдельных терминалах:
 
 ```bash
 npm run dev:backend
 ```
 
-Start the frontend **from this `UI/` directory**:
+```bash
+npm --workspace UI run dev:frontend
+```
+
+Откройте http://localhost:5173. Vite проксирует `/api` на http://localhost:3000. Вход, регистрация, чат и сохранение требуют работающего backend; персональные данные хранятся в PostgreSQL. Сервер читает корневой `.env`, ключ Gemini не используется.
+
+Команды из каталога `UI`:
 
 ```bash
 npm run dev:frontend
+npm run typecheck
+npm run build
 ```
 
-Open http://localhost:5173. Vite proxies `/api` to http://localhost:3000.
-Server settings are read from the root `.env`; Gemini settings are not used.
-
-From `UI/`, `npm run build` emits to `../dist`, `npm run typecheck` checks the
-frontend, and `npm run preview` previews the production build. Full setup and
-production startup are documented in the [root README](../README.md).
+Сборка записывается в корневой `dist/`. `npm run preview` показывает frontend-сборку, но не запускает API; для полного приложения используйте описанную в основном README раздачу через Express.
