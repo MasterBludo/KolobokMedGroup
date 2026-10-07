@@ -6,11 +6,13 @@ interface Message {
   id: string;
   sender: 'assistant' | 'user';
   text: string;
+  documentReview?: boolean;
 }
 
 interface ChatInputProps {
   disabled: boolean;
   resetKey: number;
+  draft: { text: string } | null;
   onHasInputChange: (hasInput: boolean) => void;
   onSendMessage: (message: string) => void;
 }
@@ -30,18 +32,73 @@ interface ReminderItem {
 const DEFAULT_AVATAR_URL = new URL('./assets/images/default_user_avatar_1791136890330.jpg', import.meta.url).href;
 const TRAIL_RUNNER_BG_URL = new URL('./assets/images/trail_runner_bg_1791136878819.jpg', import.meta.url).href;
 
-const OPERATIONS_LIST = [
-  'Эндопротезирование тазобедренного сустава',
-  'Артроскопия коленного сустава',
-  'Реконструкция передней крестообразной связки (ПКС)',
-  'Остеосинтез при переломе',
-  'Эндопротезирование коленного сустава',
-  'Удаление грыжи межпозвоночного диска',
+interface ConditionNode { label: string; children?: ConditionNode[] }
+const CONDITIONS: ConditionNode[] = [
+  { label: 'Травмы, отравления и некоторые другие последствия воздействия внешних причин', children: [
+    { label: 'Травмы запястья и кисти', children: [
+      { label: 'Перелом на уровне запястья и кисти', children: [
+        { label: 'Перелом другого пальца кисти', children: [
+          { label: 'Перелом фаланги мизинца' },
+        ] },
+      ] },
+    ] },
+  ] },
+  { label: 'Болезни органов пищеварения', children: [
+    { label: 'Болезни желчного пузыря, желчевыводящих путей и поджелудочной железы', children: [
+      { label: 'Холецистит' },
+    ] },
+  ] },
 ];
+
+function ConditionSelector({ onClose, onSelect }: { onClose: () => void; onSelect: (label: string) => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const [path, setPath] = useState<ConditionNode[]>([]);
+  const nodes = path.at(-1)?.children || CONDITIONS;
+  useEffect(() => {
+    const dialog = dialogRef.current!;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    dialog.showModal();
+    return () => {
+      dialog.close();
+      document.body.style.overflow = previousOverflow;
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, []);
+  useEffect(() => { dialogRef.current?.querySelector<HTMLButtonElement>('[data-condition]')?.focus(); }, [path]);
+  return (
+    <dialog ref={dialogRef} className="condition-dialog" aria-labelledby="condition-title" onCancel={e => { e.preventDefault(); onClose(); }}
+      onClick={e => { if (e.target === e.currentTarget) { const r = e.currentTarget.getBoundingClientRect(); if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) onClose(); } }}
+      onKeyDown={e => {
+        if (e.key === 'Tab') {
+          const buttons = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>('button'));
+          const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+          e.preventDefault();
+          buttons[(index + (e.shiftKey ? -1 : 1) + buttons.length) % buttons.length]?.focus();
+        }
+        if (e.key === 'ArrowLeft' && path.length) { e.preventDefault(); setPath(p => p.slice(0, -1)); }
+        if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
+          const buttons = Array.from(e.currentTarget.querySelectorAll<HTMLButtonElement>('[data-condition]'));
+          const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+          const next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1 : (index + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+          e.preventDefault(); buttons[next]?.focus();
+        }
+      }}>
+      <div className="condition-heading"><h2 id="condition-title">Выберите операцию</h2><button type="button" aria-label="Закрыть выбор операции" onClick={onClose}>×</button></div>
+      {!!path.length && <button type="button" className="condition-back" onClick={() => setPath(p => p.slice(0, -1))}>← Назад</button>}
+      {!!path.length && <p className="condition-parent">{path.at(-1)?.label}</p>}
+      <div className="condition-options">
+        {nodes.map(node => <button type="button" data-condition key={node.label} onClick={() => node.children ? setPath(p => [...p, node]) : onSelect(node.label)}><span>{node.label}</span>{node.children && <span aria-hidden="true">›</span>}</button>)}
+      </div>
+    </dialog>
+  );
+}
 
 function ChatInput({
   disabled,
   resetKey,
+  draft,
   onHasInputChange,
   onSendMessage,
 }: ChatInputProps) {
@@ -51,6 +108,13 @@ function ChatInput({
   useEffect(() => {
     setInputValue('');
   }, [resetKey]);
+
+  useEffect(() => {
+    if (!draft) return;
+    setInputValue(draft.text);
+    onHasInputChange(!!draft.text);
+    inputRef.current?.focus();
+  }, [draft, onHasInputChange]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -236,9 +300,12 @@ export default function App() {
 
   // Account sub-modals ("Настройки" & "План реабилитации")
   const [activeAccountModal, setActiveAccountModal] = useState<'settings' | 'plan' | null>(null);
+  const [settingsEmailInput, setSettingsEmailInput] = useState('');
+  const [settingsPhoneInput, setSettingsPhoneInput] = useState('');
   const [settingsNameInput, setSettingsNameInput] = useState<string>('');
 
   // Chat & Input states
+  const [inputDraft, setInputDraft] = useState<{ text: string } | null>(null);
   const [hasInput, setHasInput] = useState<boolean>(false);
   const [inputResetKey, setInputResetKey] = useState<number>(0);
   const [isSendingMessage, setIsSendingMessage] = useState<boolean>(false);
@@ -264,8 +331,6 @@ export default function App() {
   // Tasks hover popover states
   const [isTasksOpen, setIsTasksOpen] = useState<boolean>(false);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
-  const [isAddingTask, setIsAddingTask] = useState<boolean>(false);
-  const [newTaskText, setNewTaskText] = useState<string>('');
   const tasksTimeoutRef = useRef<number | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -288,7 +353,7 @@ export default function App() {
 
   const clearPatientState = () => {
     sessionCheckRef.current?.abort();chatRequestRef.current?.abort();
-    setRestoringSession(false);setIsSendingMessage(false);setIsUploadingStatement(false);setIsGeneratingSchedule(false);setIsOperationMenuOpen(false);setIsAddingTask(false);setNewTaskText('');
+    setRestoringSession(false);setIsSendingMessage(false);setIsUploadingStatement(false);setIsGeneratingSchedule(false);setIsOperationMenuOpen(false);
     patientRef.current=null;setPatient(null);setIsAuthorized(false);setUserName('');setAvatarUrl(DEFAULT_AVATAR_URL);
     setTasks([]);setSnapshot({plan:null,prescriptions:[],events:[]});
     setStartDate('');setSelectedOperation(null);setCalendarDate('');setSavingEvents([]);
@@ -332,6 +397,15 @@ export default function App() {
   useEffect(() => {
     setTasks(snapshot.events.filter(e=>e.scheduled_date===calendarDate && ['pending','completed'].includes(e.status)).map(e=>({id:e.id,text:`${e.scheduled_time?.slice(0,5) || 'Без времени'} · ${e.title}`,completed:e.status==='completed'})));
   },[snapshot,calendarDate]);
+  const [todayDate, setTodayDate] = useState(() => patientToday(Intl.DateTimeFormat().resolvedOptions().timeZone));
+  useEffect(() => {
+    const refresh = () => setTodayDate(patientToday(patient?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone));
+    refresh();
+    const timer = window.setInterval(refresh, 30_000);
+    window.addEventListener('focus', refresh);
+    return () => { window.clearInterval(timer); window.removeEventListener('focus', refresh); };
+  }, [patient?.timezone]);
+  const todayTasks = snapshot.events.filter(e => e.scheduled_date === todayDate && ['pending', 'completed'].includes(e.status)).map(e => ({ id: e.id, text: `${e.scheduled_time?.slice(0, 5) || 'Без времени'} · ${e.title}`, completed: e.status === 'completed' }));
   const handleLogout = async () => {
     try {
       if (draftId && !await cancelDraft()) return;
@@ -384,7 +458,6 @@ export default function App() {
       return;
     }
 
-    if (!isAuthorized) {setIsAuthModalOpen(true);return;}
     const userMsg: Message = {
       id: `user-${Date.now()}`,
       sender: 'user',
@@ -495,7 +568,6 @@ export default function App() {
   const handleTasksMouseLeave = () => {
     tasksTimeoutRef.current = window.setTimeout(() => {
       setIsTasksOpen(false);
-      setIsAddingTask(false);
     }, 180);
   };
 
@@ -508,14 +580,6 @@ export default function App() {
       setSnapshot(prev=>({...prev,events:prev.events.map(e=>e.id===id ? {...e,...data.event}:e)}));
     } catch(error) {setPersistenceError((error as Error).message);} finally {setSavingEvents(prev=>prev.filter(value=>value!==id));}
   };
-  const handleAddTaskSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();const text=newTaskText.trim();if(!text||!patient)return;
-    try {
-      applySnapshot(await api<PlanSnapshot>('/plan/tasks',{method:'POST',body:JSON.stringify({text,date:calendarDate})}));
-      setNewTaskText('');setIsAddingTask(false);
-    } catch(error) {setPersistenceError((error as Error).message);}
-  };
-
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -597,6 +661,7 @@ export default function App() {
         ...prev,
         {
           id: messageId,
+          documentReview: true,
           sender: 'assistant',
           text: `Вот распознанный текст выписки. Проверьте его и подтвердите перед использованием:\n\n${extractedText}`,
         },
@@ -634,11 +699,13 @@ export default function App() {
     } catch(error) {setPersistenceError((error as Error).message);} finally {setIsGeneratingSchedule(false);}
   };
   const markAllTasksCompleted = async () => {
-    for (const task of tasks.filter(t=>!t.completed)) await toggleTask(task.id,true);
+    for (const task of todayTasks.filter(t=>!t.completed)) await toggleTask(task.id,true);
   };
 
   const openSettingsModal = () => {
     setSettingsNameInput(userName);
+    setSettingsEmailInput(patient?.email || '');
+    setSettingsPhoneInput(patient?.phone || '');
     setActiveAccountModal('settings');
   };
 
@@ -647,7 +714,7 @@ export default function App() {
     if (settingsSaving) return;
     setSettingsSaving(true);setPersistenceError('');
     try {
-      const data=await api<{patient:Patient}>('/patient',{method:'PATCH',body:JSON.stringify({username:settingsNameInput})});
+      const data=await api<{patient:Patient}>('/patient',{method:'PATCH',body:JSON.stringify({username:settingsNameInput,email:settingsEmailInput,phone:settingsPhoneInput})});
       setPatient(data.patient);setUserName(data.patient.username);setActiveAccountModal(null);
     } catch(error) {setPersistenceError((error as Error).message);} finally {setSettingsSaving(false);}
   };
@@ -673,22 +740,16 @@ export default function App() {
       <div className={`account-page ${activeAccountModal ? 'account-page-detail' : ''}`}>
         {statusNotice}
         <input ref={avatarInputRef} type="file" accept="image/*" onChange={handleAvatarChange} className="hidden" aria-label="Загрузить фото профиля" />
-        {!activeAccountModal && (
-          <header className="account-topbar">
-            <button type="button" className="account-back" onClick={() => setCurrentScreen('main')}>
-              <ArrowLeftCircleOutlineIcon /><span>Назад</span>
+        <main className="account-card">
+          <header className="account-detail-header">
+            <button type="button" className="account-back" onClick={() => activeAccountModal ? setActiveAccountModal(null) : setCurrentScreen('main')}>
+              <ArrowLeftCircleOutlineIcon /><span>{activeAccountModal ? 'К профилю' : 'Назад'}</span>
             </button>
+            <h1>{activeAccountModal === 'settings' ? 'Настройки профиля' : activeAccountModal === 'plan' ? 'План реабилитации' : 'Профиль'}</h1>
           </header>
-        )}
-        <main className={`account-card ${activeAccountModal ? 'account-detail-card' : 'account-profile-card'}`}>
+          <div className="account-content" key={activeAccountModal || 'profile'}>
           {activeAccountModal ? (
             <>
-              <header className="account-detail-header">
-                <button type="button" className="account-back" onClick={() => setActiveAccountModal(null)}>
-                  <ArrowLeftCircleOutlineIcon /><span>К профилю</span>
-                </button>
-                <h1>{activeAccountModal === 'settings' ? 'Настройки профиля' : 'План реабилитации'}</h1>
-              </header>
               {activeAccountModal === 'settings' ? (
                 <form onSubmit={handleSaveSettings} className="account-settings-form">
                   <div className="account-photo-row">
@@ -702,10 +763,10 @@ export default function App() {
                     <input type="text" value={settingsNameInput} onChange={e => setSettingsNameInput(e.target.value)} required maxLength={100} autoComplete="name" />
                   </label>
                   <label className="account-field">Email
-                    <input type="email" value={patient?.email || ''} readOnly autoComplete="email" />
+                    <input type="email" value={settingsEmailInput} onChange={e => setSettingsEmailInput(e.target.value)} autoComplete="email" />
                   </label>
                   <label className="account-field">Телефон
-                    <input type="tel" value={patient?.phone || ''} readOnly autoComplete="tel" />
+                    <input type="tel" value={settingsPhoneInput} onChange={e => setSettingsPhoneInput(e.target.value)} autoComplete="tel" />
                   </label>
                   <button type="submit" className="account-save" disabled={settingsSaving}>{settingsSaving ? 'Сохраняю…' : 'Сохранить изменения'}</button>
                 </form>
@@ -758,6 +819,7 @@ export default function App() {
               </div>
             </div>
           )}
+          </div>
         </main>
       </div>
     );
@@ -766,6 +828,7 @@ export default function App() {
   return (
     <div className="h-screen w-full bg-[#FAFAFA] text-[#1A2E2B] flex flex-col relative overflow-hidden">
       {statusNotice}
+      {isOperationMenuOpen && <ConditionSelector onClose={() => setIsOperationMenuOpen(false)} onSelect={text => { setIsOperationMenuOpen(false); setInputDraft({ text }); }} />}
       {/* Hidden file input for "Прикрепите выписку" */}
       <input
         ref={fileInputRef}
@@ -813,7 +876,7 @@ export default function App() {
               <div className="px-6 pt-5 pb-4 flex items-center justify-between">
                 <div>
                   <div className="text-[16px] font-semibold text-[#1A2E2B] leading-tight">
-                    Recovery ID
+                    GIGA-восстановление
                   </div>
                   <div className="text-[13px] font-normal text-[#1A2E2B]/70 leading-tight mt-0.5">
                     Личный кабинет пациента
@@ -915,7 +978,7 @@ export default function App() {
       </AnimatePresence>
 
       {/* TOP HEADER (Static, never scrolls) */}
-      <header className="shrink-0 w-full px-10 md:px-14 pt-8 pb-4 grid grid-cols-3 items-center relative z-40">
+      <header className="shrink-0 w-full px-4 sm:px-10 md:px-14 pt-8 pb-4 grid grid-cols-[1fr_auto_1fr] items-center relative z-40">
         {/* Left Zone:
             - Shown ONLY when authorized: "Задачи" (hover opens green accent popover + blurs background)
             - Empty when not authorized
@@ -946,15 +1009,15 @@ export default function App() {
                     transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
                     className="absolute left-0 top-full pt-3 z-50"
                   >
-                    <div className="w-[348px] rounded-[36px] bg-gradient-to-br from-[#94B8B8] via-[#A8C7C7] to-[#C2DCDC] p-[2px] shadow-[0_24px_60px_rgba(26,46,43,0.14)] select-none">
+                    <div className="w-[348px] max-w-[calc(100vw-32px)] rounded-[36px] bg-gradient-to-br from-[#94B8B8] via-[#A8C7C7] to-[#C2DCDC] p-[2px] shadow-[0_24px_60px_rgba(26,46,43,0.14)] select-none">
                       {/* Green Accent Header (matching the send button color #A8C7C7) */}
                       <div className="px-6 pt-5 pb-4 flex items-start justify-between">
                         <div>
                           <div className="text-[16px] font-medium text-[#1A2E2B] leading-tight">
-                            Reminders
+                            Напоминания
                           </div>
                           <div className="text-[14px] font-normal text-[#1A2E2B]/70 leading-tight tabular-nums mt-1">
-                            <input aria-label="Дата задач" type="date" value={calendarDate} onChange={e=>setCalendarDate(e.target.value)} className="bg-transparent max-w-[150px]" />
+                            <time dateTime={todayDate}>{new Date(`${todayDate}T12:00:00`).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' })}</time>
                           </div>
                         </div>
                         <button
@@ -970,17 +1033,18 @@ export default function App() {
                       <div className="bg-[#FAFAFA] rounded-[34px] px-6 pt-6 pb-6 relative min-h-[270px] flex flex-col justify-between">
                         <div>
                           <h3 className="text-[23px] font-bold text-[#1A2E2B] tracking-tight mb-5">
-                            Tasks for Today
+                            Задачи на сегодня
                           </h3>
 
-                          <ul className="space-y-3.5 pr-12">
-                            {tasks.map((task) => (
+                          <ul className="space-y-3.5 max-h-[min(320px,45dvh)] overflow-y-auto overflow-x-hidden">
+                            {todayTasks.map((task) => (
                               <li key={task.id}>
                                 <button
                                   type="button"
                                   onClick={() => void toggleTask(task.id)}
                                   disabled={savingEvents.includes(task.id)}
-                                  title={snapshot.events.find(e=>e.id===task.id)?.description}
+                                  aria-pressed={task.completed}
+                                  title={savingEvents.includes(task.id) ? 'Сохраняю отметку…' : task.completed ? 'Снять отметку выполнения' : 'Отметить выполненной'}
                                   className="flex items-center gap-3 text-left w-full group cursor-pointer"
                                 >
                                   {task.completed ? (
@@ -1014,41 +1078,8 @@ export default function App() {
                             ))}
                           </ul>
 
-                          {isAddingTask && (
-                            <form onSubmit={handleAddTaskSubmit} className="mt-3.5 pr-14">
-                              <input
-                                type="text"
-                                autoFocus
-                                value={newTaskText}
-                                onChange={(e) => setNewTaskText(e.target.value)}
-                                onBlur={handleAddTaskSubmit}
-                                placeholder="New task..."
-                                className="w-full bg-white border border-[#DCE4E3] rounded-xl px-3 py-1.5 text-[14px] text-[#1A2E2B] placeholder:text-[#9BA6A4] focus:outline-none focus:border-[#A8C7C7]"
-                              />
-                            </form>
-                          )}
+                          {!todayTasks.length && <p className="text-[15px] text-[#879290]">На сегодня задач нет.</p>}
                         </div>
-
-                        {/* Floating Plus Button inside the bottom-right of the card */}
-                        <button
-                          type="button"
-                          onClick={() => setIsAddingTask(true)}
-                          disabled={!patient}
-                          aria-label="Add task"
-                          className="absolute bottom-5 right-5 w-[50px] h-[50px] rounded-full bg-white border border-[#E6ECEB] shadow-[0_4px_14px_rgba(26,46,43,0.06)] flex items-center justify-center text-[#1A2E2B] hover:bg-[#A8C7C7]/25 hover:scale-105 active:scale-95 transition-all cursor-pointer"
-                        >
-                          <svg
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="1.8"
-                            strokeLinecap="round"
-                            className="w-5 h-5"
-                          >
-                            <path d="M12 5V19" />
-                            <path d="M5 12H19" />
-                          </svg>
-                        </button>
                       </div>
                     </div>
                   </motion.div>
@@ -1058,7 +1089,7 @@ export default function App() {
           )}
         </div>
 
-        {/* Center Zone: Brand "Recovery" (blurs when Tasks popover is open) */}
+        {/* Center Zone: Brand "GIGA-восстановление" (blurs when Tasks popover is open) */}
         <div
           className={`flex items-center justify-center transition-all duration-200 ${
             isTasksOpen ? 'blur-[6px] opacity-60 pointer-events-none' : ''
@@ -1067,9 +1098,9 @@ export default function App() {
           <button
             type="button"
             onClick={handleResetToStart}
-            className="text-[18px] font-semibold tracking-tight text-[#1A2E2B] hover:opacity-80 transition-opacity cursor-pointer"
+            className="text-[14px] sm:text-[18px] font-semibold tracking-tight text-[#1A2E2B] hover:opacity-80 transition-opacity cursor-pointer"
           >
-            Recovery
+            GIGA-восстановление
           </button>
         </div>
 
@@ -1166,7 +1197,9 @@ export default function App() {
               <div className="relative z-40">
                 <button
                   type="button"
-                  onClick={() => setIsOperationMenuOpen((prev) => !prev)}
+                  onClick={() => setIsOperationMenuOpen(true)}
+                  aria-haspopup="dialog"
+                  aria-expanded={isOperationMenuOpen}
                   className="w-full h-[58px] bg-white border border-[#EBEBEB] hover:border-[#DCDCDC] rounded-[18px] px-3.5 flex items-center justify-between gap-2 text-left transition-all shadow-[0_2px_10px_rgba(0,0,0,0.015)] hover:shadow-[0_4px_14px_rgba(0,0,0,0.04)] cursor-pointer"
                 >
                   <div className="flex items-center gap-3 min-w-0">
@@ -1174,7 +1207,7 @@ export default function App() {
                       <StethoscopeOutlineIcon className="w-[18px] h-[18px]" />
                     </span>
                     <span className="text-[14.5px] font-medium text-[#1A2E2B] truncate">
-                      {selectedOperation ? selectedOperation : 'Выберите операцию'}
+                      Выберите операцию
                     </span>
                   </div>
                   <svg
@@ -1192,36 +1225,6 @@ export default function App() {
                   </svg>
                 </button>
 
-                {/* Operation Picker Dropdown (overlays input bar cleanly) */}
-                <AnimatePresence>
-                  {isOperationMenuOpen && (
-                    <motion.div
-                      initial={{ opacity: 0, y: 6 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: 6 }}
-                      transition={{ duration: 0.15 }}
-                      className="absolute left-0 right-0 top-full mt-2 bg-white border border-[#EBEBEB] rounded-[18px] shadow-[0_16px_40px_rgba(26,46,43,0.12)] py-2 z-50"
-                    >
-                      {OPERATIONS_LIST.map((op) => (
-                        <button
-                          key={op}
-                          type="button"
-                          onClick={() => {
-                            setSelectedOperation(op);
-                            setIsOperationMenuOpen(false);
-                          }}
-                          className={`w-full text-left px-4 py-2.5 text-[13.5px] hover:bg-[#F5F7F6] transition-colors cursor-pointer ${
-                            selectedOperation === op
-                              ? 'font-semibold text-[#1A2E2B] bg-[#F2F4F3]/60'
-                              : 'text-[#1A2E2B]'
-                          }`}
-                        >
-                          {op}
-                        </button>
-                      ))}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
               </div>
             </motion.div>
           </div>
@@ -1240,7 +1243,7 @@ export default function App() {
                         transition={{ type: 'spring', stiffness: 300, damping: 30 }}
                         className="bg-white border border-[#EBEBEB] shadow-[0_4px_20px_rgba(0,0,0,0.035)] rounded-[18px] px-5 py-4 text-[15px] font-normal text-[#1A2E2B] max-w-[85%] whitespace-pre-wrap break-words"
                       >
-                        {msg.text}
+                        {msg.documentReview ? 'Проверьте распознанный текст выписки в поле ниже и подтвердите его перед использованием.' : msg.text}
                         {msg.id === pendingStatementMessageId && pendingStatementText && (
                           <div className="flex flex-col gap-2 mt-4">
                             <textarea aria-label="Подтверждённые рекомендации" value={pendingStatementText} onChange={e=>{setPendingStatementText(e.target.value);setPlanPreview(null);}} disabled={isGeneratingSchedule} className="w-full min-h-[120px] rounded-xl border border-[#EBEBEB] p-3 text-[13px]" />
@@ -1319,6 +1322,7 @@ export default function App() {
         {/* Shared Persistent Input Form (static at bottom in chat mode, chat scrolls underneath it) */}
         <ChatInput
           resetKey={inputResetKey}
+          draft={inputDraft}
           onHasInputChange={setHasInput}
           onSendMessage={(message) => void handleSendMessage(message)}
           disabled={

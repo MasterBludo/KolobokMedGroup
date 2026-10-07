@@ -1,6 +1,6 @@
-# Recovery UI
+# GIGA-восстановление UI
 
-Frontend приложения Recovery: React 19, TypeScript, Vite 8, Tailwind CSS 4 и Motion.
+Frontend приложения GIGA-восстановление: React 19, TypeScript, Vite 8, Tailwind CSS 4 и Motion.
 
 Полное описание продукта, установка Node.js/Python/PostgreSQL, настройка GigaChat, миграции и запуск доступны в [основном README](../README.md).
 

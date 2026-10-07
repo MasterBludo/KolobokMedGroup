@@ -2,7 +2,7 @@ import { Router } from "express";
 import { randomBytes } from "node:crypto";
 import { PoolClient } from "pg";
 import { database, transaction } from "./db";
-import { ApiError, authenticate, wrap, sha256, username } from "./auth";
+import { ApiError, authenticate, wrap, sha256, username, contact } from "./auth";
 import {
   adaptReminders,
   Instruction,
@@ -406,12 +406,23 @@ export function recoveryRouter(processing: Processing) {
   router.patch(
     "/patient",
     wrap(async (req, res) => {
-      const name = username(req.body.username);
-      const { rows } = await database().query(
-        "UPDATE patients SET username=$2 WHERE id=$1 RETURNING id,username,email,phone,timezone",
-        [res.locals.patient.id, name],
+      const current = res.locals.patient;
+      const name = username(req.body.username ?? current.username);
+      const { email, phone } = contact(
+        req.body.email === undefined ? current.email : req.body.email,
+        req.body.phone === undefined ? current.phone : req.body.phone,
       );
-      res.json({ patient: rows[0] });
+      try {
+        const { rows } = await database().query(
+          "UPDATE patients SET username=$2,email=$3,phone=$4 WHERE id=$1 RETURNING id,username,email,phone,timezone",
+          [current.id, name, email, phone],
+        );
+        res.json({ patient: rows[0] });
+      } catch (error) {
+        if ((error as { code?: string }).code === "23505")
+          throw new ApiError(409, "Этот email или телефон уже зарегистрирован.");
+        throw error;
+      }
     }),
   );
   router.get(

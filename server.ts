@@ -7,7 +7,7 @@ import crypto from "crypto";
 import dotenv from "dotenv";
 import { pathToFileURL } from "node:url";
 import { checkDatabase } from "./db";
-import { ApiError, authRouter, authenticate, protectOrigins, validateAuthConfig, wrap } from "./auth";
+import { ApiError, authRouter, findPatient, protectOrigins, validateAuthConfig, wrap } from "./auth";
 import { recoveryRouter, savedContext, Processing } from "./recovery";
 import { parseScheduleJson } from "./schedule-json";
 import { runPythonScript } from "./python-runtime";
@@ -407,15 +407,15 @@ export function createApp(processing: Processing = { recognize: recognizeDocumen
   app.use("/api", protectOrigins);
   app.use("/api/auth", authRouter());
   app.use("/api/ocr", express.raw({ type: "application/octet-stream", limit: "20mb" }));
-  app.use("/api", recoveryRouter(processing));
 
-  app.post("/api/chat", authenticate, wrap(async (req, res) => {
+  app.post("/api/chat", wrap(async (req, res) => {
     const { messages, model } = req.body as {
       messages?: Array<{ role: string; content: string }>;
       model?: string;
     };
 
-    if (!messages || !Array.isArray(messages)) {
+    if (!messages || !Array.isArray(messages) || !messages.length ||
+        messages.some(message => !message || !['user', 'assistant'].includes(message.role) || typeof message.content !== 'string')) {
       res.status(400).json({ error: "Некорректный формат сообщений" });
       return;
     }
@@ -424,7 +424,13 @@ export function createApp(processing: Processing = { recognize: recognizeDocumen
     const credentials = resolveGigaChatCredentials();
     const scope = process.env.GIGACHAT_SCOPE || "GIGACHAT_API_PERS";
 
-    const recommendationsText = await savedContext(res.locals.patient.id);
+    const patient = await findPatient(req);
+    const recommendationsText = patient ? await savedContext(patient.id) : "";
+    const lastQuestion = messages.filter(message => message.role === 'user').at(-1)?.content || '';
+    if (!patient && /(?:составь|составьте|создай|создайте|сделай|сделайте|разработай|разработайте|подготовь|подготовьте)[\s\S]{0,100}(?:план|расписан)|(?:мне|для меня)[\s\S]{0,40}(?:план|расписан)|(?:план|расписан)[\s\S]{0,40}(?:для меня|мне)|(?:дай|нужен|хочу)[\s\S]{0,40}(?:персональ|индивидуаль|мой)[\s\S]{0,40}(?:план|расписан)/i.test(lastQuestion)) {
+      res.json({ reply: "Для персонального плана восстановления войдите через кнопку «Авторизуйтесь» и загрузите документы с назначениями вашего врача. Я могу ответить на общие вопросы, но не назначаю индивидуальное лечение." });
+      return;
+    }
     if (!credentials) {
       res.json({
         reply:
@@ -441,7 +447,8 @@ export function createApp(processing: Processing = { recognize: recognizeDocumen
       const systemPrompt = {
         role: "system",
         content:
-          "Ты — медицинский цифровой помощник по послеоперационному сопровождению пациентов с переломами. Отвечай вежливо, кратко и понятно." +
+          "Ты — медицинский цифровой помощник GIGA-восстановление. Отвечай вежливо, кратко и понятно на общие вопросы о восстановлении и заболеваниях, в том числе переломах и холецистите. Не ставь диагноз и не назначай самостоятельно индивидуальное лечение, препараты, дозировки или курсы. Объясняй назначения врача, когда они предоставлены, не добавляя собственных назначений." +
+          (!patient ? " Пользователь — гость. Давай только общую информацию. При запросе персонального плана объясни, что нужно войти через кнопку «Авторизуйтесь» и загрузить документы с назначениями врача. Не утверждай, что создал или сохранил план." : " Персональный план создаётся только из загруженных документов врача после подтверждения пациентом.") +
           contextNote,
       };
       const { reply } = await callGigaChatWithFallback(
@@ -455,6 +462,8 @@ export function createApp(processing: Processing = { recognize: recognizeDocumen
       res.status(502).json({ error: "Не удалось получить ответ GigaChat. Повторите попытку." });
     }
   }));
+
+  app.use("/api", recoveryRouter(processing));
 
   if (process.env.NODE_ENV === "production") {
     const distPath = path.join(process.cwd(), "dist");
