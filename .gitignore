@@ -13,3 +13,8 @@ env/
 Thumbs.db
 Desktop.ini
 *.log
+
+# Local environment files may contain credentials.
+.env
+.env.*
+!.env.example
