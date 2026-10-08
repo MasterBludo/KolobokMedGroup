@@ -1,0 +1,633 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI-помощник послеоперационного восстановления — блок-схема данных</title>
+<style>
+  :root{
+    --bg:#f5f7fb;
+    --card:#ffffff;
+    --text:#172033;
+    --muted:#61708a;
+    --line:#9aa9c0;
+    --blue:#315efb;
+    --blue2:#eaf0ff;
+    --green:#1d9b65;
+    --green2:#e8f8f0;
+    --amber:#d88a00;
+    --amber2:#fff5df;
+    --red:#cf3f4f;
+    --red2:#ffedf0;
+    --purple:#7454d8;
+    --purple2:#f0ecff;
+    --cyan:#168da6;
+    --cyan2:#e8f8fb;
+    --shadow:0 12px 32px rgba(28,43,75,.08);
+  }
+
+  *{box-sizing:border-box}
+
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Arial,sans-serif;
+    line-height:1.45;
+  }
+
+  .page{
+    width:min(1440px, calc(100% - 48px));
+    margin:0 auto;
+    padding:42px 0 70px;
+  }
+
+  header{
+    margin-bottom:28px;
+  }
+
+  h1{
+    margin:0 0 10px;
+    font-size:36px;
+    line-height:1.12;
+    letter-spacing:-.7px;
+  }
+
+  .subtitle{
+    max-width:980px;
+    color:var(--muted);
+    font-size:17px;
+  }
+
+  .legend{
+    display:flex;
+    flex-wrap:wrap;
+    gap:10px;
+    margin-top:20px;
+  }
+
+  .legend span{
+    display:inline-flex;
+    align-items:center;
+    gap:7px;
+    padding:7px 11px;
+    border-radius:999px;
+    background:#fff;
+    border:1px solid #e0e6f0;
+    color:#516078;
+    font-size:13px;
+    box-shadow:0 2px 8px rgba(28,43,75,.035);
+  }
+
+  .dot{
+    width:9px;height:9px;border-radius:50%;
+    display:inline-block;
+  }
+
+  .flow{
+    display:flex;
+    flex-direction:column;
+    gap:14px;
+  }
+
+  .row{
+    display:flex;
+    align-items:stretch;
+    justify-content:center;
+    gap:12px;
+    position:relative;
+  }
+
+  .node{
+    background:var(--card);
+    border:1px solid #dfe5ef;
+    border-radius:18px;
+    padding:18px 19px;
+    width:270px;
+    min-height:118px;
+    box-shadow:var(--shadow);
+    position:relative;
+  }
+
+  .node.wide{width:360px}
+  .node.xwide{width:520px}
+  .node.small{width:220px;min-height:105px}
+
+  .node .kicker{
+    text-transform:uppercase;
+    letter-spacing:.08em;
+    font-size:11px;
+    font-weight:700;
+    color:var(--muted);
+    margin-bottom:5px;
+  }
+
+  .node h3{
+    font-size:18px;
+    margin:0 0 7px;
+    line-height:1.2;
+  }
+
+  .node p{
+    margin:0;
+    font-size:14px;
+    color:#526078;
+  }
+
+  .node ul{
+    margin:8px 0 0 17px;
+    padding:0;
+    color:#526078;
+    font-size:13px;
+  }
+
+  .accent-blue{border-top:5px solid var(--blue)}
+  .accent-green{border-top:5px solid var(--green)}
+  .accent-amber{border-top:5px solid var(--amber)}
+  .accent-red{border-top:5px solid var(--red)}
+  .accent-purple{border-top:5px solid var(--purple)}
+  .accent-cyan{border-top:5px solid var(--cyan)}
+
+  .arrow{
+    height:34px;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    color:#74839a;
+    font-size:26px;
+    user-select:none;
+  }
+
+  .branch{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:14px;
+    width:100%;
+    max-width:980px;
+  }
+
+  .branch-label{
+    position:absolute;
+    top:-17px;
+    left:50%;
+    transform:translateX(-50%);
+    padding:4px 10px;
+    background:var(--bg);
+    color:var(--muted);
+    font-size:12px;
+    font-weight:700;
+    border-radius:999px;
+    white-space:nowrap;
+  }
+
+  .branch-wrap{
+    position:relative;
+    padding-top:14px;
+  }
+
+  .merge{
+    max-width:980px;
+    margin:0 auto;
+    border:1px dashed #bbc6d7;
+    border-radius:20px;
+    padding:16px;
+    background:rgba(255,255,255,.48);
+  }
+
+  .merge-title{
+    text-align:center;
+    color:var(--muted);
+    font-size:13px;
+    font-weight:700;
+    margin-bottom:12px;
+  }
+
+  .inner-grid{
+    display:grid;
+    grid-template-columns:repeat(2,1fr);
+    gap:12px;
+  }
+
+  .mini{
+    background:#fff;
+    border:1px solid #e1e6ef;
+    border-radius:14px;
+    padding:14px;
+  }
+
+  .mini b{
+    display:block;
+    font-size:14px;
+    margin-bottom:4px;
+  }
+
+  .mini span{
+    font-size:12px;
+    color:var(--muted);
+  }
+
+  .decision{
+    width:min(820px,100%);
+    background:var(--card);
+    border:1px solid #dfe5ef;
+    border-radius:22px;
+    padding:20px;
+    box-shadow:var(--shadow);
+    margin:0 auto;
+  }
+
+  .decision h3{
+    margin:0 0 5px;
+    text-align:center;
+    font-size:19px;
+  }
+
+  .decision p{
+    margin:0 auto 16px;
+    max-width:650px;
+    text-align:center;
+    color:var(--muted);
+    font-size:13px;
+  }
+
+  .decision-grid{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:10px;
+  }
+
+  .status{
+    border-radius:15px;
+    padding:15px;
+    min-height:122px;
+  }
+
+  .status b{
+    display:block;
+    margin-bottom:5px;
+    font-size:15px;
+  }
+
+  .status span{
+    color:#58677f;
+    font-size:12px;
+  }
+
+  .normal{background:var(--green2);border:1px solid #c7ead9}
+  .review{background:var(--amber2);border:1px solid #f1d79b}
+  .urgent{background:var(--red2);border:1px solid #f2bfc7}
+
+  .loop{
+    display:grid;
+    grid-template-columns:1fr 1.4fr 1fr;
+    gap:14px;
+    align-items:stretch;
+    width:100%;
+    max-width:1150px;
+  }
+
+  .loop .connector{
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    color:#74839a;
+    font-size:27px;
+  }
+
+  .hero{
+    width:100%;
+    background:linear-gradient(135deg,#eef3ff 0%,#ffffff 55%,#f2efff 100%);
+    border:1px solid #dbe3f4;
+    border-radius:24px;
+    padding:22px;
+    box-shadow:var(--shadow);
+  }
+
+  .hero h2{
+    margin:0 0 6px;
+    font-size:21px;
+  }
+
+  .hero p{
+    margin:0;
+    color:#526078;
+    font-size:14px;
+  }
+
+  .data-strip{
+    margin-top:13px;
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:8px;
+  }
+
+  .data-pill{
+    background:#fff;
+    border:1px solid #e1e7f0;
+    border-radius:12px;
+    padding:9px;
+    text-align:center;
+    font-size:11px;
+    color:#536179;
+  }
+
+  .section-title{
+    margin:34px 0 12px;
+    font-size:20px;
+    letter-spacing:-.2px;
+  }
+
+  .principles{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:12px;
+  }
+
+  .principle{
+    background:#fff;
+    border:1px solid #e0e6ef;
+    border-radius:16px;
+    padding:16px;
+  }
+
+  .principle b{
+    display:block;
+    margin-bottom:6px;
+    font-size:14px;
+  }
+
+  .principle p{
+    margin:0;
+    color:var(--muted);
+    font-size:12px;
+  }
+
+  footer{
+    margin-top:28px;
+    color:#708098;
+    font-size:12px;
+  }
+
+  @media (max-width: 1050px){
+    .branch{grid-template-columns:1fr}
+    .decision-grid{grid-template-columns:1fr}
+    .loop{grid-template-columns:1fr}
+    .loop .connector{transform:rotate(90deg)}
+    .principles{grid-template-columns:repeat(2,1fr)}
+    .data-strip{grid-template-columns:repeat(2,1fr)}
+  }
+
+  @media (max-width: 720px){
+    .page{width:min(100% - 24px, 1440px);padding-top:25px}
+    h1{font-size:29px}
+    .row{flex-direction:column;align-items:center}
+    .node,.node.wide,.node.xwide,.node.small{width:100%;max-width:520px}
+    .arrow{height:25px}
+    .inner-grid{grid-template-columns:1fr}
+    .principles{grid-template-columns:1fr}
+  }
+
+  @media print{
+    body{background:#fff}
+    .page{width:100%;padding:15px}
+    .node,.decision,.hero,.principle{box-shadow:none}
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>AI-помощник послеоперационного восстановления</h1>
+    <div class="subtitle">
+      Блок-схема движения данных и решений: от регистрации пациента и получения медицинских инструкций
+      до индивидуального плана восстановления, мониторинга, эскалации к врачу и возврата новых назначений в систему.
+    </div>
+
+    <div class="legend">
+      <span><i class="dot" style="background:#315efb"></i>данные пациента</span>
+      <span><i class="dot" style="background:#7454d8"></i>AI-обработка</span>
+      <span><i class="dot" style="background:#1d9b65"></i>автоматическое сопровождение</span>
+      <span><i class="dot" style="background:#d88a00"></i>проверка / эскалация</span>
+      <span><i class="dot" style="background:#cf3f4f"></i>срочная маршрутизация</span>
+    </div>
+  </header>
+
+  <div class="flow">
+
+    <div class="row">
+      <div class="node accent-blue">
+        <div class="kicker">01 · Вход</div>
+        <h3>Регистрация пациента</h3>
+        <p>Создание личного профиля, согласия, базовые сведения о пациенте.</p>
+      </div>
+    </div>
+
+    <div class="arrow">↓</div>
+
+    <div class="row">
+      <div class="node wide accent-blue">
+        <div class="kicker">02 · Источник медицинской информации</div>
+        <h3>Получение данных для восстановления</h3>
+        <ul>
+          <li>PDF / фото / скан выписки или рецепта</li>
+          <li>текст, введённый пациентом</li>
+          <li>подключённые медицинские данные (если доступны)</li>
+        </ul>
+      </div>
+
+      <div class="node wide accent-cyan">
+        <div class="kicker">Альтернативный путь</div>
+        <h3>Нет индивидуальной выписки</h3>
+        <p>Пациент выбирает тип операции и получает общий информационный маршрут восстановления из проверенной базы источников.</p>
+      </div>
+    </div>
+
+    <div class="arrow">↓</div>
+
+    <div class="row">
+      <div class="node xwide accent-purple">
+        <div class="kicker">03 · AI понимание документов</div>
+        <h3>Извлечение структуры восстановления</h3>
+        <p>
+          AI выделяет из документов операцию, дату, назначения, лекарства, режим, ограничения,
+          упражнения, контрольные точки, сроки, тревожные признаки и другие указания врача.
+        </p>
+      </div>
+    </div>
+
+    <div class="arrow">↓</div>
+
+    <div class="merge">
+      <div class="merge-title">Объединение индивидуальных назначений и проверенного клинического протокола</div>
+      <div class="inner-grid">
+        <div class="mini">
+          <b>Индивидуальные назначения</b>
+          <span>Выписка, рекомендации и заключения конкретных специалистов пациента.</span>
+        </div>
+        <div class="mini">
+          <b>Клинический протокол</b>
+          <span>Проверенные общие рекомендации для выбранного типа операции.</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow">↓</div>
+
+    <div class="row">
+      <div class="hero">
+        <h2>04 · Персональный Recovery Plan</h2>
+        <p>
+          Система превращает медицинские указания в понятный план восстановления,
+          адаптированный под конкретного пациента и день после операции.
+        </p>
+        <div class="data-strip">
+          <div class="data-pill">💊 лекарства</div>
+          <div class="data-pill">🚶 активность</div>
+          <div class="data-pill">🩹 уход</div>
+          <div class="data-pill">📅 контрольные точки</div>
+          <div class="data-pill">🏋️ упражнения</div>
+          <div class="data-pill">🍽 ограничения</div>
+          <div class="data-pill">📝 задания</div>
+          <div class="data-pill">⚠️ тревожные признаки</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow">↓</div>
+
+    <div class="row">
+      <div class="node wide accent-green">
+        <div class="kicker">05 · Повседневное сопровождение</div>
+        <h3>Пациент пользуется планом</h3>
+        <p>Просматривает календарь, выполняет рекомендации, получает напоминания и задаёт вопросы AI.</p>
+      </div>
+
+      <div class="node wide accent-green">
+        <div class="kicker">06 · Daily Check-in</div>
+        <h3>Мониторинг самочувствия</h3>
+        <p>Короткий диалог о боли, температуре, симптомах, лекарствах, активности и изменении состояния.</p>
+      </div>
+    </div>
+
+    <div class="arrow">↓</div>
+
+    <div class="row">
+      <div class="node xwide accent-purple">
+        <div class="kicker">07 · Структурирование данных</div>
+        <h3>Текущее состояние пациента</h3>
+        <p>
+          Ответы пациента превращаются в структурированные события и временную динамику:
+          что было вчера, что происходит сегодня и как состояние меняется относительно ожидаемого восстановления.
+        </p>
+      </div>
+    </div>
+
+    <div class="arrow">↓</div>
+
+    <div class="decision">
+      <h3>08 · Оценка состояния и маршрутизация</h3>
+      <p>
+        Система сопоставляет текущие данные пациента с индивидуальным планом и заранее утверждёнными клиническими правилами.
+      </p>
+
+      <div class="decision-grid">
+        <div class="status normal">
+          <b>🟢 NORMAL</b>
+          <span>Восстановление соответствует ожидаемой динамике. AI продолжает сопровождение и отвечает на типовые вопросы в рамках разрешённых источников.</span>
+        </div>
+
+        <div class="status review">
+          <b>🟠 REVIEW</b>
+          <span>Есть отклонение или нерешённая проблема. Пациенту предлагается консультация, а для врача автоматически собирается предварительный анамнез.</span>
+        </div>
+
+        <div class="status urgent">
+          <b>🔴 URGENT</b>
+          <span>Обнаружен признак, требующий срочной медицинской оценки. AI не меняет лечение, а запускает заранее определённую медицинскую маршрутизацию.</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow">↓</div>
+
+    <div class="loop">
+      <div class="node accent-green">
+        <div class="kicker">09A · Без врача</div>
+        <h3>Продолжение восстановления</h3>
+        <p>AI решает рутинный вопрос, пациент продолжает план, система собирает следующую точку наблюдения.</p>
+      </div>
+
+      <div class="node accent-amber">
+        <div class="kicker">09B · Нужен специалист</div>
+        <h3>Предварительный анамнез + запись</h3>
+        <p>
+          Система формирует краткое резюме: операция, день восстановления, симптомы, динамика,
+          лекарства, ответы на уточняющие вопросы и причина обращения. Затем пациент переходит к записи.
+        </p>
+      </div>
+
+      <div class="node accent-red">
+        <div class="kicker">09C · Срочная помощь</div>
+        <h3>Медицинская маршрутизация</h3>
+        <p>Пациент получает заранее определённую инструкцию по обращению за срочной медицинской помощью.</p>
+      </div>
+    </div>
+
+    <div class="arrow">↓</div>
+
+    <div class="row">
+      <div class="node wide accent-blue">
+        <div class="kicker">10 · Новый медицинский документ</div>
+        <h3>Заключение специалиста / новая выписка</h3>
+        <p>Пациент передаёт новый документ в систему после очного или дистанционного взаимодействия.</p>
+      </div>
+
+      <div class="node wide accent-purple">
+        <div class="kicker">11 · Обновление</div>
+        <h3>Сравнение старого и нового плана</h3>
+        <p>AI выделяет новые назначения и изменения, после подтверждения пациента формируется новая версия Recovery Plan.</p>
+      </div>
+    </div>
+
+    <div class="arrow">↺</div>
+
+    <div class="row">
+      <div class="hero">
+        <h2>12 · Замкнутый цикл восстановления</h2>
+        <p>
+          Новый план становится актуальным источником сопровождения. Мониторинг продолжается до завершения периода восстановления,
+          после чего эпизод закрывается и сохраняется история.
+        </p>
+      </div>
+    </div>
+
+  </div>
+
+  <h2 class="section-title">Ключевые принципы движения данных</h2>
+
+  <div class="principles">
+    <div class="principle">
+      <b>Источник важнее генерации</b>
+      <p>AI персонализирует и объясняет информацию из выписки и проверенной базы, а не придумывает лечение.</p>
+    </div>
+    <div class="principle">
+      <b>AI решает рутину</b>
+      <p>Типовые вопросы и сопровождение остаются в цифровом контуре, когда ситуация находится внутри утверждённого сценария.</p>
+    </div>
+    <div class="principle">
+      <b>Врач получает исключения</b>
+      <p>При отклонении врач получает не всю переписку, а структурированный предварительный анамнез и динамику.</p>
+    </div>
+    <div class="principle">
+      <b>Новый документ обновляет цикл</b>
+      <p>После консультации пациент возвращает заключение в систему, и актуальный план восстановления строится заново.</p>
+    </div>
+  </div>
+
+  <footer>
+    Концептуальная схема движения данных. Не является медицинским протоколом и не заменяет клинические рекомендации,
+    решения врача или официальную маршрутизацию экстренной помощи.
+  </footer>
+</div>
+</body>
+</html>
